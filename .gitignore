@@ -1,0 +1,6 @@
+/teleport-client
+/bin/
+teleport-session*.json
+sessions/
+.claude/
+.DS_Store

@@ -1,0 +1,241 @@
+package main
+
+import (
+	"fmt"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/pion/stun"
+)
+
+func TestInterfaceAddrIP(t *testing.T) {
+	ipv4 := net.ParseIP("192.0.2.10")
+	ipv6 := net.ParseIP("2001:db8::10")
+	for _, test := range []struct {
+		name string
+		addr net.Addr
+		want net.IP
+	}{
+		{name: "network address", addr: &net.IPNet{IP: ipv4, Mask: net.CIDRMask(24, 32)}, want: ipv4},
+		{name: "point-to-point address", addr: &net.IPAddr{IP: ipv6}, want: ipv6},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := interfaceAddrIP(test.addr); !got.Equal(test.want) {
+				t.Fatalf("interfaceAddrIP(%T) = %v, want %v", test.addr, got, test.want)
+			}
+		})
+	}
+}
+
+func TestNominationTrackerAcceptsOnlyMasterWaitSequence(t *testing.T) {
+	tracker := newNominationTracker()
+	const first = "[2001:db8::1]:5000"
+	const second = "[2001:db8::2]:5001"
+
+	// A slave must not choose a peer before the CONNECT response activates the
+	// nomination phase, even if it sees a syntactically valid master request.
+	if tracker.observe(first, nominationWaitSequence[0]) {
+		t.Fatal("selected before activation")
+	}
+
+	tracker.activate()
+	if tracker.observe(first, 12345) {
+		t.Fatal("selected an invalid wait value")
+	}
+	for i, want := range nominationWaitSequence[1:] {
+		selected := tracker.observe(first, want)
+		if selected != (i == len(nominationWaitSequence)-2) {
+			t.Fatalf("first candidate step %d selected=%v", i, selected)
+		}
+		// A competing candidate maintains its own master-driven sequence.
+		if i < len(nominationWaitSequence)-2 {
+			if otherSelected := tracker.observe(second, nominationWaitSequence[i]); otherSelected {
+				t.Fatalf("second candidate step %d selected too early", i)
+			}
+		}
+	}
+	if got := tracker.selectedEndpoint(); got != first {
+		t.Fatalf("selected endpoint = %q, want %q", got, first)
+	}
+	if tracker.observe(second, nominationWaitSequence[len(nominationWaitSequence)-1]) {
+		t.Fatal("selected a second candidate after first selection")
+	}
+}
+
+func TestNominationTrackerRetainsPreResponseMasterSequence(t *testing.T) {
+	tracker := newNominationTracker()
+	const peer = "[2001:db8::1]:5000"
+	for _, wait := range nominationWaitSequence {
+		if tracker.observe(peer, wait) {
+			t.Fatal("selected before activation")
+		}
+	}
+	tracker.activate()
+	if got := tracker.selectedEndpoint(); got != peer {
+		t.Fatalf("selected endpoint after activation = %q, want %q", got, peer)
+	}
+}
+
+func TestStunNominationWait(t *testing.T) {
+	msg := stun.MustBuild(stun.TransactionID, stun.BindingRequest,
+		stun.RawAttribute{Type: stun.AttrData, Value: []byte(`{"wait":125}`)})
+	if got, ok := stunNominationWait(msg); !ok || got != 125 {
+		t.Fatalf("stunNominationWait = (%d, %v), want (125, true)", got, ok)
+	}
+}
+
+func TestStunBindingProbeIsAuthenticatedAndHasNoNominationData(t *testing.T) {
+	const secret = "probe-secret"
+	raw, _ := stunBindingProbe(secret)
+	msg, ok := parseStunMessage(raw)
+	if !ok {
+		t.Fatal("stunBindingProbe produced an invalid STUN message")
+	}
+	if msg.Type != stun.BindingRequest {
+		t.Fatalf("probe type = %s, want Binding Request", msg.Type)
+	}
+	if !validStunIntegrity(msg, secret) {
+		t.Fatal("probe MESSAGE-INTEGRITY did not validate")
+	}
+	if _, err := msg.Get(stun.AttrData); err == nil {
+		t.Fatal("probe unexpectedly carried nomination DATA")
+	}
+}
+
+func TestEarlyNominationStopRestoresSocketDeadline(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	listener := newEarlyNominationListener(&udpSockets{V4: conn}, "secret", newNominationTracker())
+	listener.Start()
+	stopped := make(chan struct{})
+	go func() {
+		listener.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("early nomination listener did not stop promptly")
+	}
+
+	sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+	if _, err := sender.WriteToUDP([]byte("deadline-check"), conn.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatal(err)
+	}
+	timer := time.AfterFunc(time.Second, func() { _ = conn.SetReadDeadline(time.Now()) })
+	defer timer.Stop()
+	buf := make([]byte, 32)
+	if _, _, err := conn.ReadFromUDP(buf); err != nil {
+		t.Fatalf("socket was not reusable after listener stop: %v", err)
+	}
+}
+
+func TestProbeCandidatesSendsAuthenticatedBindingRequest(t *testing.T) {
+	const secret = "fallback-probe-secret"
+	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	local, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+		buf := make([]byte, 1500)
+		n, remote, err := peer.ReadFromUDP(buf)
+		if err != nil {
+			result <- err
+			return
+		}
+		msg, ok := parseStunMessage(buf[:n])
+		if !ok || msg.Type != stun.BindingRequest || !validStunIntegrity(msg, secret) {
+			result <- fmt.Errorf("fallback probe was not an authenticated Binding Request")
+			return
+		}
+		_, err = peer.WriteToUDP(stunBindingSuccess(msg, remote, secret), remote)
+		result <- err
+	}()
+
+	addr := peer.LocalAddr().String()
+	got := probeCandidates(&udpSockets{V4: local}, []candidate{{Type: "iface", Addr: addr}}, secret)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if got != addr {
+		t.Fatalf("probeCandidates = %q, want %q", got, addr)
+	}
+}
+
+func TestAcceptBindingSuccessRequiresProbedAddressAndMatchingTransactionID(t *testing.T) {
+	const addr = "192.0.2.1:5000"
+	_, tx := stunRequest()
+	probed := map[string][][12]byte{addr: {tx}}
+
+	matching := stun.MustBuild(stun.NewTransactionIDSetter(tx), stun.BindingSuccess)
+	if !acceptBindingSuccess(probed, addr, matching) {
+		t.Fatal("rejected a Binding Success from a probed address with the matching transaction ID")
+	}
+
+	if acceptBindingSuccess(probed, "192.0.2.2:5000", matching) {
+		t.Fatal("accepted a Binding Success from an address we never probed")
+	}
+
+	_, otherTx := stunRequest()
+	mismatched := stun.MustBuild(stun.NewTransactionIDSetter(otherTx), stun.BindingSuccess)
+	if acceptBindingSuccess(probed, addr, mismatched) {
+		t.Fatal("accepted a Binding Success with a transaction ID we never sent, from a probed address")
+	}
+
+	// A delayed response to an earlier probe must still be accepted even
+	// after a later tick has re-probed the same address with a new
+	// transaction ID.
+	_, newerTx := stunRequest()
+	probed[addr] = append(probed[addr], newerTx)
+	stale := stun.MustBuild(stun.NewTransactionIDSetter(tx), stun.BindingSuccess)
+	if !acceptBindingSuccess(probed, addr, stale) {
+		t.Fatal("rejected a delayed Binding Success matching an earlier outstanding probe")
+	}
+}
+
+func TestRespondToStunBindingRequestRejectsInvalidIntegrity(t *testing.T) {
+	msg := stun.MustBuild(stun.TransactionID, stun.BindingRequest,
+		stun.NewShortTermIntegrity("wrong-secret"))
+	addr := &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 5000}
+
+	resp, accepted := respondToStunBindingRequest(nil, msg, addr, "expected-secret", nil)
+	if accepted {
+		t.Fatal("accepted a Binding Request with invalid MESSAGE-INTEGRITY")
+	}
+	if resp != nil {
+		t.Fatal("returned a response for a Binding Request that failed integrity validation")
+	}
+}
+
+func TestCompatibleCandidatesHonorsOpenSocketFamilies(t *testing.T) {
+	candidates := []candidate{
+		{Type: "iface", Addr: "192.0.2.1:1000"},
+		{Type: "iface", Addr: "[2001:db8::1]:1000"},
+	}
+	got := compatibleCandidates(&udpSockets{V4: &net.UDPConn{}}, candidates)
+	if len(got) != 1 || got[0].Addr != "192.0.2.1:1000" {
+		t.Fatalf("IPv4-only compatible candidates = %#v, want only IPv4", got)
+	}
+	got = compatibleCandidates(&udpSockets{V6: &net.UDPConn{}}, candidates)
+	if len(got) != 1 || got[0].Addr != "[2001:db8::1]:1000" {
+		t.Fatalf("IPv6-only compatible candidates = %#v, want only IPv6", got)
+	}
+}
