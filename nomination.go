@@ -410,6 +410,8 @@ type earlyNominationListener struct {
 	mu   sync.Mutex
 	logs []packetLog
 
+	allowed map[string]struct{}
+
 	stop *udpReadStopper
 }
 
@@ -421,6 +423,25 @@ func newEarlyNominationListener(sockets *udpSockets, stunSecretHash string, nomi
 		hints:          make(chan nominationHint, 1),
 		stop:           newUDPReadStopper(sockets),
 	}
+}
+
+// restrictToCandidates makes the listener ignore nomination traffic from
+// every tuple except the supplied candidates. It must be called before Start.
+// TURN-only mode uses this after CONNECT_RESPONSE reveals the relay tuples so
+// a direct console candidate cannot win master nomination.
+func (l *earlyNominationListener) restrictToCandidates(candidates []candidate) {
+	l.allowed = make(map[string]struct{}, len(candidates))
+	for _, c := range candidates {
+		l.allowed[c.Addr] = struct{}{}
+	}
+}
+
+func (l *earlyNominationListener) allows(addr string) bool {
+	if l.allowed == nil {
+		return true
+	}
+	_, ok := l.allowed[addr]
+	return ok
 }
 
 // Start begins reading from every open outer socket. Each listener is
@@ -439,6 +460,10 @@ func (l *earlyNominationListener) readLoop(conn *net.UDPConn, done <-chan struct
 			return
 		}
 		data := append([]byte(nil), buf[:n]...)
+		if !l.allows(addr.String()) {
+			appLog.Debug("ignored nomination from disallowed candidate", "remote", addr.String())
+			continue
+		}
 		l.appendLog(logPacket("in", addr, data))
 		msg, ok := parseStunMessage(data)
 		if !ok || msg.Type != stun.BindingRequest {

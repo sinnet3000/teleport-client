@@ -30,6 +30,7 @@ type cliFlags struct {
 	invite           string
 	name             string
 	endpointOverride string
+	forceTurn        bool
 	printConfig      bool
 	socks5Addr       string
 	family           networkFamily
@@ -122,19 +123,38 @@ func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionR
 	if err := validateLocalCandidates(local, flags.family); err != nil {
 		return connectionAttemptResult{}, err
 	}
+	if flags.forceTurn {
+		if err := validateTurnPrerequisites(ice, local); err != nil {
+			return connectionAttemptResult{}, err
+		}
+		appLog.Info("TURN-only mode enabled; preserving STUN discovery for console relay permission")
+	}
 
 	stunSecret := randomB64(32)
 	stunSecretHash := stunIntegrityKey(stunSecret)
 	nomination := newNominationTracker()
-	early := newEarlyNominationListener(sockets, stunSecretHash, nomination)
-	early.Start()
-	defer early.Stop()
+	var early *earlyNominationListener
+	if !flags.forceTurn {
+		early = newEarlyNominationListener(sockets, stunSecretHash, nomination)
+		early.Start()
+		defer early.Stop()
+	}
 
 	connResp, err := connectAndAwaitResponse(ctx, *session, flags.name, pub, stunSecret, local, ice, early)
 	if err != nil {
 		return connectionAttemptResult{}, err
 	}
-	endpoint, endpointMode, candidateQueue, candidateTypes, err := negotiateEndpoint(ctx, flags.endpointOverride, sockets, port, connResp, stunSecretHash, nomination, early, local)
+	if flags.forceTurn {
+		turnCandidates := compatibleCandidates(sockets, candidatesOfType(connResp.ServerInfo.PeerDesc.Candidates, "turn"), local)
+		if len(turnCandidates) == 0 {
+			return connectionAttemptResult{}, errors.New("--turn requested, but the console advertised no compatible TURN relay candidate")
+		}
+		early = newEarlyNominationListener(sockets, stunSecretHash, nomination)
+		early.restrictToCandidates(turnCandidates)
+		early.Start()
+		defer early.Stop()
+	}
+	endpoint, endpointMode, candidateQueue, candidateTypes, err := negotiateEndpoint(ctx, flags.endpointOverride, flags.forceTurn, sockets, port, connResp, stunSecretHash, nomination, early, local)
 	if err != nil {
 		return connectionAttemptResult{}, err
 	}
@@ -181,6 +201,21 @@ func validateLocalCandidates(local []candidate, family networkFamily) error {
 	return nil
 }
 
+func validateTurnPrerequisites(ice []iceServer, local []candidate) error {
+	if _, ok := stunServerFromIce(ice); !ok {
+		return errors.New("--turn requires a stun: URL in ICE_CONFIGURATION because console teleportd rejects TURN-only ICE configuration")
+	}
+	if _, ok := turnServerFromIce(ice); !ok {
+		return errors.New("--turn requires a turn: URL with transport=udp in ICE_CONFIGURATION")
+	}
+	for _, c := range local {
+		if c.Type == "reflex" {
+			return nil
+		}
+	}
+	return errors.New("--turn requires a reflex candidate; console teleportd uses it to create the TURN permission")
+}
+
 // defaultClientName returns the local hostname for the --name default, so a
 // fresh install reports its own device name to Teleport instead of every
 // installation sharing the same placeholder. Falls back to a fixed name if
@@ -196,6 +231,7 @@ func parseFlags() cliFlags {
 	invite := flag.String("invite", "", "pair with a Teleport invite UUID or URL")
 	name := flag.String("name", defaultClientName(), "set the client name")
 	endpointOverride := flag.String("endpoint", "", "set the WireGuard endpoint")
+	forceTurn := flag.Bool("turn", false, "require and use a console TURN relay while retaining STUN discovery")
 	printConfig := flag.Bool("print-config", false, "print the WireGuard configuration and exit")
 	socks5Addr := flag.String("socks5", "127.0.0.1:1080", "set the SOCKS5 listen address")
 	forceIPv4 := flag.Bool("4", false, "use IPv4 only")
@@ -243,6 +279,9 @@ func parseFlags() cliFlags {
 			failUsage("invalid --endpoint: %v", err)
 		}
 	}
+	if *forceTurn && *endpointOverride != "" {
+		failUsage("--turn and --endpoint are mutually exclusive")
+	}
 	if *invite != "" {
 		parsed, err := normalizeInviteSecret(*invite)
 		if err != nil {
@@ -278,6 +317,7 @@ func parseFlags() cliFlags {
 		invite:           *invite,
 		name:             *name,
 		endpointOverride: *endpointOverride,
+		forceTurn:        *forceTurn,
 		printConfig:      *printConfig,
 		socks5Addr:       *socks5Addr,
 		family:           family,
@@ -429,6 +469,9 @@ func connectAndAwaitResponse(ctx context.Context, session sessionResult, name, p
 	}
 
 	connResp, err := pollForResponseWithContext(ctx, apiRequestFunc(ctx), session.Token, connectReq.TeleportRequestID, "CONNECT_RESPONSE", responsePollInterval, 200, func() {
+		if early == nil {
+			return
+		}
 		select {
 		case nom := <-early.hints:
 			// The real endpoint/mode is recovered from early.Logs() below once
@@ -454,8 +497,11 @@ func connectAndAwaitResponse(ctx context.Context, session sessionResult, name, p
 // early listener, or — as a last resort — the late fallback listener in
 // waitForNomination. It also returns the ranked queue of candidates that sent
 // us a Binding Request, for the post-connect endpoint retry loop.
-func negotiateEndpoint(ctx context.Context, endpointOverride string, sockets *udpSockets, port int, connResp *apiResponse, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate) (endpoint, mode string, candidateQueue []string, candidateTypes map[string]string, err error) {
+func negotiateEndpoint(ctx context.Context, endpointOverride string, forceTurn bool, sockets *udpSockets, port int, connResp *apiResponse, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate) (endpoint, mode string, candidateQueue []string, candidateTypes map[string]string, err error) {
 	peerCandidates := connResp.ServerInfo.PeerDesc.Candidates
+	if forceTurn {
+		peerCandidates = compatibleCandidates(sockets, candidatesOfType(peerCandidates, "turn"), local)
+	}
 	appLog.Info("peer candidates received", "count", len(peerCandidates))
 	for _, c := range peerCandidates {
 		appLog.Debug("peer candidate", "type", c.Type, "address", c.Addr)
@@ -479,6 +525,16 @@ func negotiateEndpoint(ctx context.Context, endpointOverride string, sockets *ud
 	candidateQueue = buildCandidateRetryQueue(endpoint, candidateQueue, compatibleCandidates(sockets, peerCandidates, local))
 	candidateTypes = candidateTypeMap(peerCandidates)
 	return endpoint, mode, candidateQueue, candidateTypes, nil
+}
+
+func candidatesOfType(candidates []candidate, candidateType string) []candidate {
+	filtered := make([]candidate, 0, len(candidates))
+	for _, c := range candidates {
+		if c.Type == candidateType {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered
 }
 
 // resolveNominatedEndpoint tries per-tuple nomination, then an observed

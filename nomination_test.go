@@ -233,6 +233,29 @@ func TestEarlyNominationStopRestoresSocketDeadline(t *testing.T) {
 	}
 }
 
+func TestEarlyNominationListenerCandidateRestriction(t *testing.T) {
+	listener := newEarlyNominationListener(nil, "secret", newNominationTracker())
+	listener.restrictToCandidates([]candidate{{Type: "turn", Addr: "203.0.113.10:5000"}})
+	if !listener.allows("203.0.113.10:5000") {
+		t.Fatal("listener rejected its allowed TURN candidate")
+	}
+	if listener.allows("203.0.113.20:5000") {
+		t.Fatal("listener accepted a direct candidate in TURN-only mode")
+	}
+}
+
+func TestCandidatesOfTypeKeepsOnlyTurnRelays(t *testing.T) {
+	got := candidatesOfType([]candidate{
+		{Type: "iface", Addr: "192.168.1.1:5000"},
+		{Type: "turn", Addr: "203.0.113.10:6000"},
+		{Type: "reflex", Addr: "198.51.100.10:5000"},
+		{Type: "turn", Addr: "[2001:db8::10]:6000"},
+	}, "turn")
+	if len(got) != 2 || got[0].Type != "turn" || got[1].Type != "turn" {
+		t.Fatalf("TURN candidate filter = %#v, want two relay candidates", got)
+	}
+}
+
 func TestProbeCandidatesSendsAuthenticatedBindingRequest(t *testing.T) {
 	const secret = "fallback-probe-secret"
 	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})

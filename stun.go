@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -35,27 +36,46 @@ func parseXorMapped(data []byte) (string, bool) {
 // in a fetched GET_ICE_CONFIGURATION server list.
 func stunServerFromIce(ice []iceServer) (string, bool) {
 	for _, s := range ice {
-		for _, u := range s.URLs {
-			if !strings.HasPrefix(u, "stun:") {
+		for _, rawURL := range s.URLs {
+			u, ok := parseConsoleICEURL(rawURL)
+			if !ok || u.Scheme != "stun" || u.Hostname() == "" {
 				continue
 			}
-			hostport := strings.TrimPrefix(u, "stun:")
-			if i := strings.IndexByte(hostport, '?'); i >= 0 {
-				hostport = hostport[:i]
+			port := u.Port()
+			if port == "" {
+				port = "3478"
 			}
-			if hostport == "" {
-				continue
-			}
-			if _, _, err := net.SplitHostPort(hostport); err != nil {
-				// RFC 7064: a stun: URL with no port defaults to 3478.
-				// Strip any bracketing first so a bare IPv6 host (e.g.
-				// "[2001:db8::1]") doesn't get double-bracketed.
-				hostport = net.JoinHostPort(strings.Trim(hostport, "[]"), "3478")
-			}
-			return hostport, true
+			return net.JoinHostPort(u.Hostname(), port), true
 		}
 	}
 	return "", false
+}
+
+// turnServerFromIce mirrors the console parser's important constraints. The
+// recovered teleportd accepts the turn scheme only with transport=udp; turns
+// and TCP/TLS relay URLs do not create its TURN worker.
+func turnServerFromIce(ice []iceServer) (string, bool) {
+	for _, s := range ice {
+		for _, rawURL := range s.URLs {
+			u, ok := parseConsoleICEURL(rawURL)
+			if !ok || u.Scheme != "turn" || u.Hostname() == "" || u.Query().Get("transport") != "udp" {
+				continue
+			}
+			port := u.Port()
+			if port == "" {
+				port = "3478"
+			}
+			return net.JoinHostPort(u.Hostname(), port), true
+		}
+	}
+	return "", false
+}
+
+func parseConsoleICEURL(rawURL string) (*url.URL, bool) {
+	// teleportd turns the first colon into :// before using net/url.Parse.
+	normalized := strings.Replace(rawURL, ":", "://", 1)
+	u, err := url.Parse(normalized)
+	return u, err == nil
 }
 
 func stunNetwork(family networkFamily) (string, error) {
