@@ -455,9 +455,6 @@ func connectAndAwaitResponse(ctx context.Context, session sessionResult, name, p
 // waitForNomination. It also returns the ranked queue of candidates that sent
 // us a Binding Request, for the post-connect endpoint retry loop.
 func negotiateEndpoint(ctx context.Context, endpointOverride string, sockets *udpSockets, port int, connResp *apiResponse, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate) (endpoint, mode string, candidateQueue []string, candidateTypes map[string]string, err error) {
-	endpoint = endpointOverride
-	mode = "override"
-
 	peerCandidates := connResp.ServerInfo.PeerDesc.Candidates
 	appLog.Info("peer candidates received", "count", len(peerCandidates))
 	for _, c := range peerCandidates {
@@ -466,45 +463,12 @@ func negotiateEndpoint(ctx context.Context, endpointOverride string, sockets *ud
 
 	stopCandidateProbes := startPeerCandidateProbes(sockets, peerCandidates, stunSecretHash)
 	defer stopCandidateProbes()
-	if endpoint == "" {
-		// Activation allows a verified per-tuple sequence received before the
-		// response to select an endpoint. The Android bridge waits up to 40s.
-		nomination.activate()
-		appLog.Debug("waiting for per-tuple nomination", "timeout", "40s")
-		endpoint = nomination.waitForSelection(ctx, 40*time.Second)
-		if err := ctx.Err(); err != nil {
+	if endpointOverride != "" {
+		endpoint, mode = endpointOverride, "override"
+	} else {
+		endpoint, mode, candidateQueue, err = resolveNominatedEndpoint(ctx, sockets, port, peerCandidates, stunSecretHash, nomination, early, local)
+		if err != nil {
 			return "", "", nil, nil, err
-		}
-		if endpoint != "" {
-			mode = "per_tuple_nomination"
-		} else {
-			appLog.Debug("per-tuple nomination wait timed out")
-		}
-
-		nominationPackets := early.Logs()
-		if len(nominationPackets) > 0 {
-			seenCandidates := make(map[string]bool)
-			for _, p := range nominationPackets {
-				if p.Direction == "in" && p.STUN && p.STUNType == "Binding request" {
-					if !seenCandidates[p.Addr] {
-						seenCandidates[p.Addr] = true
-						candidateQueue = append(candidateQueue, p.Addr)
-					}
-					if endpoint == "" {
-						endpoint = p.Addr
-						mode = "inbound_binding_request"
-					}
-				}
-			}
-		}
-		if endpoint == "" {
-			early.Stop()
-			selection := waitForNomination(ctx, sockets, port, peerCandidates, stunSecretHash, local)
-			if err := ctx.Err(); err != nil {
-				return "", "", nil, nil, err
-			}
-			endpoint = selection.Endpoint
-			mode = selection.Mode
 		}
 	}
 	stopCandidateProbes()
@@ -515,6 +479,50 @@ func negotiateEndpoint(ctx context.Context, endpointOverride string, sockets *ud
 	candidateQueue = buildCandidateRetryQueue(endpoint, candidateQueue, compatibleCandidates(sockets, peerCandidates, local))
 	candidateTypes = candidateTypeMap(peerCandidates)
 	return endpoint, mode, candidateQueue, candidateTypes, nil
+}
+
+// resolveNominatedEndpoint tries per-tuple nomination, then an observed
+// inbound Binding Request, then the blocking waitForNomination fallback.
+func resolveNominatedEndpoint(ctx context.Context, sockets *udpSockets, port int, peerCandidates []candidate, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate) (endpoint, mode string, candidateQueue []string, err error) {
+	// The Android bridge waits up to 40s for a verified per-tuple sequence.
+	nomination.activate()
+	appLog.Debug("waiting for per-tuple nomination", "timeout", "40s")
+	endpoint = nomination.waitForSelection(ctx, 40*time.Second)
+	if err := ctx.Err(); err != nil {
+		return "", "", nil, err
+	}
+	if endpoint != "" {
+		mode = "per_tuple_nomination"
+	} else {
+		appLog.Debug("per-tuple nomination wait timed out")
+	}
+
+	nominationPackets := early.Logs()
+	if len(nominationPackets) > 0 {
+		seenCandidates := make(map[string]bool)
+		for _, p := range nominationPackets {
+			if p.Direction == "in" && p.STUN && p.STUNType == "Binding request" {
+				if !seenCandidates[p.Addr] {
+					seenCandidates[p.Addr] = true
+					candidateQueue = append(candidateQueue, p.Addr)
+				}
+				if endpoint == "" {
+					endpoint = p.Addr
+					mode = "inbound_binding_request"
+				}
+			}
+		}
+	}
+	if endpoint == "" {
+		early.Stop()
+		selection := waitForNomination(ctx, sockets, port, peerCandidates, stunSecretHash, local)
+		if err := ctx.Err(); err != nil {
+			return "", "", nil, err
+		}
+		endpoint = selection.Endpoint
+		mode = selection.Mode
+	}
+	return endpoint, mode, candidateQueue, nil
 }
 
 // candidateTypeMap maps each advertised candidate's address to its type
