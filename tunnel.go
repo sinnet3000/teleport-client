@@ -35,6 +35,11 @@ const (
 	endpointRecoveryInterval       = 15 * time.Second
 	endpointRecoveryMaxBackoff     = 30 * time.Second
 	endpointRecoveryRounds         = 2
+
+	// candidateHandshakeTimeout covers one WireGuard handshake retry cycle (5s).
+	candidateHandshakeTimeout = 6 * time.Second
+	// candidateRetryMaxDuration is a backstop; queue exhaustion is the usual exit.
+	candidateRetryMaxDuration = 40 * time.Second
 )
 
 var errTunnelRenegotiationRequired = errors.New("known WireGuard endpoints exhausted; fresh Teleport negotiation required")
@@ -292,10 +297,11 @@ func waitForRecovery(ctx context.Context, duration time.Duration) bool {
 
 // retryEndpointOnHandshakeTimeout switches the WireGuard peer to the next
 // queued candidate if the current endpoint hasn't completed a handshake
-// within 15s, giving up after 90s total or once the queue is exhausted.
+// within candidateHandshakeTimeout, giving up after candidateRetryMaxDuration
+// or once the queue is exhausted.
 func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, peerPubHex, currentEndpoint string, candidateQueue []string, nomination *nominationTracker, sockets *udpSockets, stunSecretHash string, exhausted chan<- struct{}) {
 	queueIdx := 0
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	var nominationSelected <-chan struct{}
 	if nomination != nil {
@@ -321,13 +327,14 @@ func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, pe
 				appLog.Warn("switching endpoint to late verified nomination", "endpoint", selected)
 				currentEndpoint = selected
 				lastSwitchTime = time.Now()
+				forceHandshakeInitiation(dev, peerPubHex)
 			}
 		case <-ticker.C:
 		}
 		ipcData, err := dev.IpcGet()
 		if err != nil {
-			if time.Since(devUpTime) >= 90*time.Second {
-				appLog.Warn("endpoint retry stopped", "reason", "90s timeout reached; WireGuard stats unavailable")
+			if time.Since(devUpTime) >= candidateRetryMaxDuration {
+				appLog.Warn("endpoint retry stopped", "reason", "timeout reached; WireGuard stats unavailable")
 				signalEndpointExhaustion(ctx, exhausted)
 				return
 			}
@@ -348,13 +355,13 @@ func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, pe
 		if handshakeOK {
 			return
 		}
-		if time.Since(devUpTime) >= 90*time.Second {
-			appLog.Warn("endpoint retry stopped", "reason", "90s timeout reached")
+		if time.Since(devUpTime) >= candidateRetryMaxDuration {
+			appLog.Warn("endpoint retry stopped", "reason", "timeout reached")
 			signalEndpointExhaustion(ctx, exhausted)
 			return
 		}
 
-		if time.Since(lastSwitchTime) >= 15*time.Second {
+		if time.Since(lastSwitchTime) >= candidateHandshakeTimeout {
 			nextCandidateAddr, nextIdx, ok := nextEndpointCandidate(candidateQueue, queueIdx, currentEndpoint)
 			queueIdx = nextIdx
 			if ok {
@@ -364,6 +371,7 @@ func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, pe
 					appLog.Warn("switching endpoint after handshake timeout", "endpoint", nextCandidateAddr)
 					currentEndpoint = nextCandidateAddr
 					lastSwitchTime = time.Now()
+					forceHandshakeInitiation(dev, peerPubHex)
 				}
 			} else {
 				appLog.Warn("endpoint retry stopped", "reason", "candidate queue exhausted")
@@ -371,6 +379,23 @@ func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, pe
 				return
 			}
 		}
+	}
+}
+
+// forceHandshakeInitiation sends a handshake initiation immediately instead
+// of waiting for wireguard-go's own retransmitHandshake timer, which runs on
+// a fixed 5s+jitter cadence set by the original handshake attempt and is not
+// reset by an endpoint switch (device/uapi.go just updates peer.endpoint.val).
+// Without this, a short candidateHandshakeTimeout could switch endpoints
+// before WireGuard ever sends a packet on the new one. SendHandshakeInitiation
+// itself still no-ops if a handshake went out under RekeyTimeout (5s) ago.
+func forceHandshakeInitiation(dev *device.Device, peerPubHex string) {
+	var pk device.NoisePublicKey
+	if err := pk.FromHex(peerPubHex); err != nil {
+		return
+	}
+	if peer := dev.LookupPeer(pk); peer != nil {
+		_ = peer.SendHandshakeInitiation(true)
 	}
 }
 
