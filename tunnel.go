@@ -277,9 +277,7 @@ func recoverWireGuardEndpoints(ctx context.Context, dev *device.Device, peerPubH
 				return
 			default:
 			}
-			sendPeerCandidateProbe(sockets, endpoint, stunSecretHash)
-			ipc := fmt.Sprintf("public_key=%s\nendpoint=%s\n", peerPubHex, endpoint)
-			if err := dev.IpcSet(ipc); err != nil {
+			if err := switchEndpoint(dev, peerPubHex, endpoint, sockets, stunSecretHash); err != nil {
 				appLog.Warn("automatic endpoint recovery update failed", "endpoint", endpoint, "error", err)
 			} else {
 				appLog.Warn("automatic endpoint recovery trying candidate", "endpoint", endpoint, "round", round)
@@ -373,9 +371,7 @@ func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, pe
 			if selected == "" || selected == currentEndpoint {
 				continue
 			}
-			sendPeerCandidateProbe(sockets, selected, stunSecretHash)
-			ipc := fmt.Sprintf("public_key=%s\nendpoint=%s\n", peerPubHex, selected)
-			if err := dev.IpcSet(ipc); err == nil {
+			if err := switchEndpoint(dev, peerPubHex, selected, sockets, stunSecretHash); err == nil {
 				appLog.Warn("switching endpoint to late verified nomination", "endpoint", selected)
 				currentEndpoint = selected
 				lastSwitchTime = time.Now()
@@ -417,9 +413,7 @@ func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, pe
 			nextCandidateAddr, nextIdx, ok := nextEndpointCandidate(candidateQueue, queueIdx, currentEndpoint)
 			queueIdx = nextIdx
 			if ok {
-				sendPeerCandidateProbe(sockets, nextCandidateAddr, stunSecretHash)
-				ipc := fmt.Sprintf("public_key=%s\nendpoint=%s\n", peerPubHex, nextCandidateAddr)
-				if err := dev.IpcSet(ipc); err == nil {
+				if err := switchEndpoint(dev, peerPubHex, nextCandidateAddr, sockets, stunSecretHash); err == nil {
 					appLog.Warn("switching endpoint after handshake timeout", "endpoint", nextCandidateAddr)
 					currentEndpoint = nextCandidateAddr
 					lastSwitchTime = time.Now()
@@ -432,6 +426,13 @@ func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, pe
 			}
 		}
 	}
+}
+
+// switchEndpoint probes addr and updates the peer's WireGuard endpoint.
+func switchEndpoint(dev *device.Device, peerPubHex, addr string, sockets *udpSockets, stunSecretHash string) error {
+	sendPeerCandidateProbe(sockets, addr, stunSecretHash)
+	ipc := fmt.Sprintf("public_key=%s\nendpoint=%s\n", peerPubHex, addr)
+	return dev.IpcSet(ipc)
 }
 
 // forceHandshakeInitiation sends a handshake initiation immediately instead
