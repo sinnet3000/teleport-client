@@ -79,13 +79,7 @@ func reflexiveCandidateFromConn(conn *net.UDPConn, ice []iceServer, family netwo
 	}
 	stunServer, ok := stunServerFromIce(ice)
 	if !ok {
-		// The historical fallback is only supported on the IPv4 path. In an
-		// IPv6-only run, report that the server supplied no usable STUN URL.
-		if family == familyIPv6 {
-			return candidate{}, errors.New("ICE_CONFIGURATION supplied no IPv6 STUN endpoint")
-		}
-		stunServer = "global.stun.twilio.com:3478"
-		appLog.Warn("ICE configuration has no STUN URL; using fallback", "server", stunServer)
+		return candidate{}, errors.New("ICE_CONFIGURATION supplied no console-compatible STUN endpoint")
 	}
 	addr, err := net.ResolveUDPAddr(network, stunServer)
 	if err != nil {
