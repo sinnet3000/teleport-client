@@ -29,7 +29,9 @@ jobs:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           BINARY=teleport-client
-          LDFLAGS="-X main.version=${VERSION}"
+          COMMIT=${GITHUB_SHA::8}
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}"
           DIST_DIR=dist
 
           mkdir -p ${DIST_DIR}
@@ -71,4 +73,5 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             dist/teleport-client_* \
             dist/checksums.txt \
+            --title "${GITHUB_REF_NAME}" \
             --generate-notes

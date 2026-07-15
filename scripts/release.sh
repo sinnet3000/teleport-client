@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Release a semantic version. The script creates a draft GitHub release so its
-# notes can be reviewed and humanized before publication.
+# Release a semantic version. The tag-triggered GitHub Action builds the
+# binaries, uploads them, and creates the release.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -41,10 +41,4 @@ git tag -a "$version" -m "$version"
 printf 'Pushing %s and %s...\n' "$branch" "$version"
 git push origin "$branch" "$version"
 
-printf 'Creating draft GitHub release...\n'
-gh release create "$version" \
-	--draft \
-	--generate-notes \
-	--title "$version"
-
-printf 'Draft release created. Review and publish it with: gh release edit %s --draft=false\n' "$version"
+printf 'Tag pushed. GitHub Actions will build the binaries and create release %s.\n' "$version"
