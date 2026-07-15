@@ -23,6 +23,9 @@ func TestDiscoverPathMTUMatchesLoopbackInterface(t *testing.T) {
 	if want < minTunnelMTU {
 		want = minTunnelMTU
 	}
+	if want > maxTunnelMTU {
+		want = maxTunnelMTU
+	}
 
 	for _, endpoint := range []*net.UDPAddr{
 		{IP: net.ParseIP("127.0.0.1"), Port: 65001},
@@ -56,6 +59,9 @@ func TestDiscoverPathMTUFallsBackWhenDialFails(t *testing.T) {
 func TestMTUConstantsAreConsistent(t *testing.T) {
 	if fallbackMTU < minTunnelMTU {
 		t.Fatalf("fallbackMTU (%d) must be >= minTunnelMTU (%d)", fallbackMTU, minTunnelMTU)
+	}
+	if maxTunnelMTU < minTunnelMTU {
+		t.Fatalf("maxTunnelMTU (%d) must be >= minTunnelMTU (%d)", maxTunnelMTU, minTunnelMTU)
 	}
 	if wgOverheadBytes <= 0 {
 		t.Fatalf("wgOverheadBytes must be positive, got %d", wgOverheadBytes)

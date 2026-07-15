@@ -244,14 +244,18 @@ const fallbackMTU = 1420
 // MTU (e.g. PPPoE) must still be respected to avoid physical fragmentation.
 const minTunnelMTU = 1280
 
+// maxTunnelMTU caps the discovered MTU; a local interface's jumbo MTU (e.g.
+// a cloud VCN NIC) doesn't reflect the real internet path and blackholes.
+const maxTunnelMTU = fallbackMTU
+
 // discoverPathMTU mirrors wg-quick's auto_mtu: it finds the MTU of the local
 // interface the OS would use to reach endpoint, then subtracts WireGuard's
 // per-packet overhead. Unlike wg-quick it doesn't shell out to `ip route
 // get` / `route get`; instead it "connects" a UDP socket to the endpoint
 // (no packets are sent) and reads back the OS-selected local address, then
 // matches that address against net.Interfaces() to find the egress
-// interface's MTU, clamped up to minTunnelMTU if the computed value is
-// smaller. Falls back to fallbackMTU only if discovery fails outright.
+// interface's MTU, clamped to [minTunnelMTU, maxTunnelMTU]. Falls back to
+// fallbackMTU only if discovery fails outright.
 func discoverPathMTU(endpoint *net.UDPAddr) int {
 	if endpoint == nil || endpoint.IP == nil || endpoint.IP.IsUnspecified() || endpoint.Port <= 0 || endpoint.Port > 65535 {
 		appLog.Debug("path MTU discovery: invalid endpoint, using fallback", "endpoint", endpoint, "mtu", fallbackMTU)
@@ -295,6 +299,9 @@ func discoverPathMTU(endpoint *net.UDPAddr) int {
 			mtu := iface.MTU - wgOverheadBytes
 			if mtu < minTunnelMTU {
 				mtu = minTunnelMTU
+			}
+			if mtu > maxTunnelMTU {
+				mtu = maxTunnelMTU
 			}
 			appLog.Debug("path MTU discovery: resolved", "interface", iface.Name, "interface_mtu", iface.MTU, "tunnel_mtu", mtu)
 			return mtu
