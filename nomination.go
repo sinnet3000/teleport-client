@@ -452,7 +452,7 @@ func acceptBindingSuccess(probed map[string][][12]byte, addr string, msg *stun.M
 	return false
 }
 
-func waitForNomination(s *udpSockets, port int, cands []candidate, sessionSecretHash string) endpointSelection {
+func waitForNomination(s *udpSockets, port int, cands []candidate, sessionSecretHash string, local []candidate) endpointSelection {
 	if s == nil {
 		return endpointSelection{}
 	}
@@ -577,7 +577,7 @@ func waitForNomination(s *udpSockets, port int, cands []candidate, sessionSecret
 			}
 		case <-done:
 			stopReadLoops()
-			return endpointSelection{Endpoint: probeCandidates(s, cands, sessionSecretHash), Mode: "fallback_probe", Packets: logs}
+			return endpointSelection{Endpoint: probeCandidates(s, cands, sessionSecretHash, local), Mode: "fallback_probe", Packets: logs}
 		}
 	}
 }
@@ -605,8 +605,8 @@ func rankCandidates(c []candidate) []candidate {
 	return out
 }
 
-func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string) string {
-	ordered := compatibleCandidates(s, cands)
+func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string, local []candidate) string {
+	ordered := compatibleCandidates(s, cands, local)
 	appLog.Debug("fallback probe starting", "candidates", len(ordered))
 	for _, c := range ordered {
 		host, _, err := net.SplitHostPort(c.Addr)
@@ -647,19 +647,40 @@ func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string)
 			return c.Addr
 		}
 	}
+	// Nothing answered; guess. Prefer a publicly routable candidate
+	// (reflex/turn) over a private/loopback/link-local iface address,
+	// which is almost certainly unreachable unless we share the peer's LAN.
+	for _, c := range ordered {
+		if isPubliclyRoutableCandidateAddr(c.Addr) {
+			return c.Addr
+		}
+	}
 	if len(ordered) > 0 {
 		return ordered[0].Addr
 	}
 	return ""
 }
 
+func isPubliclyRoutableCandidateAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate()
+}
+
 // compatibleCandidates drops peer candidates that cannot be reached through
-// one of our open sockets. In particular, a -4 run must never fall back to an
-// IPv6 candidate merely because IPv6 has a higher generic ranking.
-func compatibleCandidates(s *udpSockets, cands []candidate) []candidate {
+// one of our open sockets, or whose family we never found a real local
+// candidate for -- an open socket alone doesn't mean that family actually
+// routes anywhere (e.g. dual-stack opens a v6 socket even on an IPv4-only
+// host). In particular, a -4 run must never fall back to an IPv6 candidate
+// merely because IPv6 has a higher generic ranking.
+func compatibleCandidates(s *udpSockets, cands []candidate, local []candidate) []candidate {
 	if s == nil {
 		return nil
 	}
+	haveLocalV4, haveLocalV6 := localCandidateFamilies(local)
 	var compatible []candidate
 	for _, c := range cands {
 		host, _, err := net.SplitHostPort(c.Addr)
@@ -670,9 +691,31 @@ func compatibleCandidates(s *udpSockets, cands []candidate) []candidate {
 		if ip == nil {
 			continue
 		}
-		if ip.To4() != nil && s.V4 != nil || ip.To4() == nil && s.V6 != nil {
+		if ip.To4() != nil && s.V4 != nil && haveLocalV4 || ip.To4() == nil && s.V6 != nil && haveLocalV6 {
 			compatible = append(compatible, c)
 		}
 	}
 	return rankCandidates(compatible)
+}
+
+func localCandidateFamilies(local []candidate) (haveV4, haveV6 bool) {
+	for _, c := range local {
+		if haveV4 && haveV6 {
+			return
+		}
+		host, _, err := net.SplitHostPort(c.Addr)
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			continue
+		}
+		if ip.To4() != nil {
+			haveV4 = true
+		} else {
+			haveV6 = true
+		}
+	}
+	return
 }

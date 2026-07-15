@@ -81,7 +81,7 @@ func main() {
 
 	connResp := connectAndAwaitResponse(session, flags.name, pub, stunSecret, local, ice, early, fatal)
 
-	endpoint, endpointMode, candidateQueue := negotiateEndpoint(flags.endpointOverride, sockets, port, connResp, stunSecretHash, nomination, early, fatal)
+	endpoint, endpointMode, candidateQueue := negotiateEndpoint(flags.endpointOverride, sockets, port, connResp, stunSecretHash, nomination, early, local, fatal)
 
 	conf := buildConfig(priv, port, endpoint, connResp.ServerInfo, connResp.DNSAddrs, connResp.ClientIP)
 	appLog.Info("endpoint selected", "endpoint", endpoint, "mode", endpointMode)
@@ -369,7 +369,7 @@ func connectAndAwaitResponse(session sessionResult, name, pub, stunSecret string
 // early listener, or — as a last resort — the late fallback listener in
 // waitForNomination. It also returns the ranked queue of candidates that sent
 // us a Binding Request, for the post-connect endpoint retry loop.
-func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, connResp *apiResponse, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, fatal func(error)) (endpoint, mode string, candidateQueue []string) {
+func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, connResp *apiResponse, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate, fatal func(error)) (endpoint, mode string, candidateQueue []string) {
 	endpoint = endpointOverride
 	mode = "override"
 
@@ -410,7 +410,7 @@ func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, c
 		}
 		if endpoint == "" {
 			early.Stop()
-			selection := waitForNomination(sockets, port, peerCandidates, stunSecretHash)
+			selection := waitForNomination(sockets, port, peerCandidates, stunSecretHash, local)
 			endpoint = selection.Endpoint
 			mode = selection.Mode
 		}

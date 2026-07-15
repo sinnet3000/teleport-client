@@ -56,6 +56,27 @@ func TestIsRoutableCandidateIP(t *testing.T) {
 	}
 }
 
+func TestIsPubliclyRoutableCandidateAddr(t *testing.T) {
+	for _, tt := range []struct {
+		addr string
+		want bool
+	}{
+		{"192.168.1.220:1234", false},
+		{"10.0.0.5:1234", false},
+		{"[fd00::1]:1234", false},
+		{"203.0.113.5:1234", true},
+		{"54.244.51.38:19144", true},
+		{"[2806:101e:9:28ee::1]:1234", true},
+		{"127.0.0.1:1234", false},
+		{"169.254.1.5:1234", false},
+		{"[fe80::1]:1234", false},
+	} {
+		if got := isPubliclyRoutableCandidateAddr(tt.addr); got != tt.want {
+			t.Fatalf("isPubliclyRoutableCandidateAddr(%q) = %v, want %v", tt.addr, got, tt.want)
+		}
+	}
+}
+
 func TestNominationTrackerAcceptsOnlyMasterWaitSequence(t *testing.T) {
 	tracker := newNominationTracker()
 	const first = "[2001:db8::1]:5000"
@@ -199,7 +220,8 @@ func TestProbeCandidatesSendsAuthenticatedBindingRequest(t *testing.T) {
 	}()
 
 	addr := peer.LocalAddr().String()
-	got := probeCandidates(&udpSockets{V4: local}, []candidate{{Type: "iface", Addr: addr}}, secret)
+	ourLocal := []candidate{{Type: "iface", Addr: "127.0.0.1:1"}}
+	got := probeCandidates(&udpSockets{V4: local}, []candidate{{Type: "iface", Addr: addr}}, secret, ourLocal)
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}
@@ -258,12 +280,31 @@ func TestCompatibleCandidatesHonorsOpenSocketFamilies(t *testing.T) {
 		{Type: "iface", Addr: "192.0.2.1:1000"},
 		{Type: "iface", Addr: "[2001:db8::1]:1000"},
 	}
-	got := compatibleCandidates(&udpSockets{V4: &net.UDPConn{}}, candidates)
+	dualStackLocal := []candidate{
+		{Type: "iface", Addr: "10.0.0.5:1000"},
+		{Type: "iface", Addr: "[2001:db8::5]:1000"},
+	}
+	got := compatibleCandidates(&udpSockets{V4: &net.UDPConn{}}, candidates, dualStackLocal)
 	if len(got) != 1 || got[0].Addr != "192.0.2.1:1000" {
 		t.Fatalf("IPv4-only compatible candidates = %#v, want only IPv4", got)
 	}
-	got = compatibleCandidates(&udpSockets{V6: &net.UDPConn{}}, candidates)
+	got = compatibleCandidates(&udpSockets{V6: &net.UDPConn{}}, candidates, dualStackLocal)
 	if len(got) != 1 || got[0].Addr != "[2001:db8::1]:1000" {
 		t.Fatalf("IPv6-only compatible candidates = %#v, want only IPv6", got)
+	}
+}
+
+func TestCompatibleCandidatesRequiresRealLocalCandidateNotJustOpenSocket(t *testing.T) {
+	candidates := []candidate{
+		{Type: "iface", Addr: "192.0.2.1:1000"},
+		{Type: "iface", Addr: "[2001:db8::1]:1000"},
+	}
+	// Dual-stack: both sockets open, but we never found a real local IPv6
+	// candidate (e.g. an IPv4-only LTE hotspot). The peer's IPv6 candidate
+	// must not be treated as compatible just because a v6 socket exists.
+	ipv4OnlyLocal := []candidate{{Type: "iface", Addr: "10.0.0.5:1000"}}
+	got := compatibleCandidates(&udpSockets{V4: &net.UDPConn{}, V6: &net.UDPConn{}}, candidates, ipv4OnlyLocal)
+	if len(got) != 1 || got[0].Addr != "192.0.2.1:1000" {
+		t.Fatalf("compatibleCandidates with no real local IPv6 = %#v, want only IPv4", got)
 	}
 }
