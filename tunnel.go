@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.zx2c4.com/wireguard/device"
@@ -66,18 +67,24 @@ type wireGuardPeerStats struct {
 // starts the SOCKS5 proxy and UDP echo pinger, and retries queued observed or
 // advertised candidates on a handshake timeout. It blocks while supervising
 // the tunnel and automatically cycles known endpoints after correlated health
-// loss; only non-recoverable local errors return through fatal.
-func runTunnel(p tunnelParams, fatal func(error)) error {
-	lifecycleCtx, stopLifecycle := context.WithCancel(context.Background())
+// loss; non-recoverable local errors are returned to the caller.
+func runTunnel(ctx context.Context, p tunnelParams) error {
+	lifecycleCtx, stopLifecycle := context.WithCancel(ctx)
 	defer stopLifecycle()
 
 	privHex, err := b64KeyToHex(p.priv)
-	fatal(err)
+	if err != nil {
+		return err
+	}
 	peerPubHex, err := b64KeyToHex(p.connResp.ServerInfo.WGPubKey)
-	fatal(err)
+	if err != nil {
+		return err
+	}
 
 	endpointAddr, err := net.ResolveUDPAddr("udp", p.endpoint)
-	fatal(err)
+	if err != nil {
+		return err
+	}
 	epStr := endpointAddr.String()
 
 	var deviceAddrs []netip.Addr
@@ -104,11 +111,18 @@ func runTunnel(p tunnelParams, fatal func(error)) error {
 	mtu := discoverPathMTU(endpointAddr)
 	appLog.Info("path MTU discovered", "endpoint", endpointAddr.String(), "mtu", mtu)
 	tun, tunnelNet, err := netstack.CreateNetTUN(deviceAddrs, dnsAddrs, mtu)
-	fatal(err)
+	if err != nil {
+		return err
+	}
 
 	bind := &stunBind{conn4: p.sockets.V4, conn6: p.sockets.V6, stunSecretHash: p.stunSecretHash, nomination: p.nomination}
 	dev := device.NewDevice(tun, bind, newWireGuardLogger(appLog, p.debug))
 	defer dev.Close()
+	var workerWG sync.WaitGroup
+	defer func() {
+		stopLifecycle()
+		workerWG.Wait()
+	}()
 
 	mask := p.connResp.ServerInfo.TunnelMask
 	if mask == 0 {
@@ -117,19 +131,25 @@ func runTunnel(p tunnelParams, fatal func(error)) error {
 	ipc := fmt.Sprintf("private_key=%s\nlisten_port=%d\npublic_key=%s\nendpoint=%s\npersistent_keepalive_interval=25\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\n",
 		privHex, p.port, peerPubHex, epStr)
 	if err := dev.IpcSet(ipc); err != nil {
-		fatal(err)
+		return err
 	}
 	if err := dev.Up(); err != nil {
-		fatal(err)
+		return err
 	}
 	appLog.Debug("WireGuard device started", "endpoint", p.endpoint)
 	renegotiate := make(chan struct{}, 1)
 	if len(p.candidateQueue) > 0 || p.nomination != nil {
-		go retryEndpointOnHandshakeTimeout(lifecycleCtx, dev, peerPubHex, p.endpoint, p.candidateQueue, p.candidateTypes, p.nomination, p.sockets, p.stunSecretHash, renegotiate)
+		workerWG.Add(1)
+		go func() {
+			defer workerWG.Done()
+			retryEndpointOnHandshakeTimeout(lifecycleCtx, dev, peerPubHex, p.endpoint, p.candidateQueue, p.candidateTypes, p.nomination, p.sockets, p.stunSecretHash, renegotiate)
+		}()
 	}
 	echoStopped := make(chan error, 1)
 	healthEvents := make(chan udpEchoHealthEvent)
+	workerWG.Add(1)
 	go func() {
+		defer workerWG.Done()
 		if err := runUDPEchoPinger(lifecycleCtx, tunnelNet, p.stunSecret, p.connResp.ServerInfo, healthEvents); err != nil {
 			echoStopped <- err
 		}
@@ -150,6 +170,8 @@ func runTunnel(p tunnelParams, fatal func(error)) error {
 	}()
 	for {
 		select {
+		case <-lifecycleCtx.Done():
+			return lifecycleCtx.Err()
 		case err := <-echoStopped:
 			if recoveryCancel != nil {
 				recoveryCancel()
@@ -181,16 +203,20 @@ func runTunnel(p tunnelParams, fatal func(error)) error {
 				}
 				if recoveryCancel == nil {
 					appLog.Warn("WireGuard tunnel unhealthy; starting automatic endpoint recovery")
-					recoveryCancel = startWireGuardEndpointRecovery(lifecycleCtx, dev, peerPubHex, current.endpoint, knownEndpoints, p.sockets, p.stunSecretHash, renegotiate)
+					recoveryCancel = startWireGuardEndpointRecovery(lifecycleCtx, &workerWG, dev, peerPubHex, current.endpoint, knownEndpoints, p.sockets, p.stunSecretHash, renegotiate)
 				}
 			}
 		}
 	}
 }
 
-func startWireGuardEndpointRecovery(parent context.Context, dev *device.Device, peerPubHex, currentEndpoint string, knownEndpoints []string, sockets *udpSockets, stunSecretHash string, exhausted chan<- struct{}) context.CancelFunc {
+func startWireGuardEndpointRecovery(parent context.Context, wg *sync.WaitGroup, dev *device.Device, peerPubHex, currentEndpoint string, knownEndpoints []string, sockets *udpSockets, stunSecretHash string, exhausted chan<- struct{}) context.CancelFunc {
 	recoveryCtx, cancel := context.WithCancel(parent)
-	go recoverWireGuardEndpoints(recoveryCtx, dev, peerPubHex, currentEndpoint, knownEndpoints, sockets, stunSecretHash, exhausted)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		recoverWireGuardEndpoints(recoveryCtx, dev, peerPubHex, currentEndpoint, knownEndpoints, sockets, stunSecretHash, exhausted)
+	}()
 	return cancel
 }
 

@@ -26,13 +26,18 @@ type loggedSocksConn struct {
 
 type socks5Proxy struct {
 	listener net.Listener
+	done     chan struct{}
 }
 
 func (p *socks5Proxy) Close() error {
 	if p == nil || p.listener == nil {
 		return nil
 	}
-	return p.listener.Close()
+	err := p.listener.Close()
+	if p.done != nil {
+		<-p.done
+	}
+	return err
 }
 
 func (c *loggedSocksConn) Close() error {
@@ -92,13 +97,15 @@ func startSocks5Proxy(addr string, tunnelNet *netstack.Net) (*socks5Proxy, error
 		socks5.WithResolver(tunnelSocksResolver{net: tunnelNet}),
 		socks5.WithAuthMethods([]socks5.Authenticator{socks5.NoAuthAuthenticator{}}),
 	)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		if err := server.Serve(listener); err != nil && !errors.Is(err, net.ErrClosed) {
 			appLog.Error("SOCKS5 proxy stopped", "error", err)
 		}
 	}()
 	appLog.Info("SOCKS5 proxy listening", "address", listener.Addr().String(), "transport", "Teleport")
-	return &socks5Proxy{listener: listener}, nil
+	return &socks5Proxy{listener: listener, done: done}, nil
 }
 
 func validateSocks5Addr(addr string) error {

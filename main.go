@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -41,82 +44,128 @@ type sessionResult struct {
 func main() {
 	flags := parseFlags()
 	appLog = newAppLogger(os.Stderr, flags.debug)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	fatal := func(err error) {
-		if err != nil {
-			appLog.Error("fatal error", "error", err)
-			os.Exit(1)
-		}
+	if err := runClient(ctx, flags); err != nil && !errors.Is(err, context.Canceled) {
+		appLog.Error("fatal error", "error", err)
+		os.Exit(1)
 	}
+	appLog.Info("Teleport client stopped")
+}
 
-	session := establishSession(flags, fatal)
+func runClient(ctx context.Context, flags cliFlags) error {
+	session, err := establishSession(ctx, flags)
+	if err != nil {
+		return err
+	}
 	reconnectBackoff := 2 * time.Second
 	for attempt := 1; ; attempt++ {
-		priv, pub, err := wgKeypair()
-		fatal(err)
-
-		// A fresh ICE/CONNECT exchange is required after known endpoints are
-		// exhausted because the console's public UDP tuple may have changed.
-		ice := fetchICEConfiguration(session.Token, session.Secret, fatal)
-		port := listenPort()
-		sockets, err := openUDPSockets(port, flags.family)
-		fatal(err)
-		local := gatherLocalCandidates(sockets, port, flags.family, ice)
-		if err := validateLocalCandidates(local, flags.family); err != nil {
-			sockets.Close()
-			fatal(err)
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-
-		stunSecret := randomB64(32)
-		stunSecretHash := stunIntegrityKey(stunSecret)
-		nomination := newNominationTracker()
-		early := newEarlyNominationListener(sockets, stunSecretHash, nomination)
-		early.Start()
-
-		connResp := connectAndAwaitResponse(session, flags.name, pub, stunSecret, local, ice, early, fatal)
-		endpoint, endpointMode, candidateQueue, candidateTypes := negotiateEndpoint(flags.endpointOverride, sockets, port, connResp, stunSecretHash, nomination, early, local, fatal)
-
-		conf := buildConfig(priv, port, endpoint, connResp.ServerInfo, connResp.DNSAddrs, connResp.ClientIP)
-		appLog.Info("endpoint selected", "endpoint", endpoint, "mode", endpointMode, "connection_attempt", attempt)
-		appLog.Debug("WireGuard peer configured", "public_key", connResp.ServerInfo.WGPubKey)
-		if session.Access != nil {
-			_, _ = apiRequest("DELETE", "/"+session.Access.TeleportRequestID, session.DeviceToken, nil)
-			session.Access = nil
+		result, err := runConnectionAttempt(ctx, flags, &session, attempt)
+		if result.printedConfig {
+			return nil
 		}
-
-		if flags.printConfig {
-			sockets.Close()
-			fmt.Print(conf)
-			return
+		if err != nil && errors.Is(err, context.Canceled) {
+			return err
 		}
-
-		early.Stop()
-		tunnelStarted := time.Now()
-		err = runTunnel(tunnelParams{
-			priv:           priv,
-			port:           port,
-			endpoint:       endpoint,
-			connResp:       connResp,
-			stunSecret:     stunSecret,
-			stunSecretHash: stunSecretHash,
-			sockets:        sockets,
-			nomination:     nomination,
-			socks5Addr:     flags.socks5Addr,
-			debug:          flags.debug,
-			candidateQueue: candidateQueue,
-			candidateTypes: candidateTypes,
-		}, fatal)
-		sockets.Close()
-		if time.Since(tunnelStarted) >= 5*time.Minute {
+		if !result.tunnelStarted {
+			return err
+		}
+		if result.tunnelDuration >= 5*time.Minute {
 			reconnectBackoff = 2 * time.Second
 		}
 		appLog.Warn("Teleport tunnel disconnected; renegotiating", "error", err, "backoff", reconnectBackoff)
-		time.Sleep(reconnectBackoff)
+		if !waitForContext(ctx, reconnectBackoff) {
+			return ctx.Err()
+		}
 		reconnectBackoff *= 2
 		if reconnectBackoff > 30*time.Second {
 			reconnectBackoff = 30 * time.Second
 		}
 	}
+}
+
+type connectionAttemptResult struct {
+	printedConfig  bool
+	tunnelStarted  bool
+	tunnelDuration time.Duration
+}
+
+func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionResult, attempt int) (connectionAttemptResult, error) {
+	priv, pub, err := wgKeypair()
+	if err != nil {
+		return connectionAttemptResult{}, err
+	}
+
+	// A fresh ICE/CONNECT exchange is required after known endpoints are
+	// exhausted because the console's public UDP tuple may have changed.
+	ice, err := fetchICEConfiguration(ctx, session.Token, session.Secret)
+	if err != nil {
+		return connectionAttemptResult{}, err
+	}
+	port := listenPort()
+	sockets, err := openUDPSockets(port, flags.family)
+	if err != nil {
+		return connectionAttemptResult{}, err
+	}
+	defer sockets.Close()
+	local := gatherLocalCandidates(sockets, port, flags.family, ice)
+	if err := validateLocalCandidates(local, flags.family); err != nil {
+		return connectionAttemptResult{}, err
+	}
+
+	stunSecret := randomB64(32)
+	stunSecretHash := stunIntegrityKey(stunSecret)
+	nomination := newNominationTracker()
+	early := newEarlyNominationListener(sockets, stunSecretHash, nomination)
+	early.Start()
+	defer early.Stop()
+
+	connResp, err := connectAndAwaitResponse(ctx, *session, flags.name, pub, stunSecret, local, ice, early)
+	if err != nil {
+		return connectionAttemptResult{}, err
+	}
+	endpoint, endpointMode, candidateQueue, candidateTypes, err := negotiateEndpoint(ctx, flags.endpointOverride, sockets, port, connResp, stunSecretHash, nomination, early, local)
+	if err != nil {
+		return connectionAttemptResult{}, err
+	}
+
+	conf := buildConfig(priv, port, endpoint, connResp.ServerInfo, connResp.DNSAddrs, connResp.ClientIP)
+	appLog.Info("endpoint selected", "endpoint", endpoint, "mode", endpointMode, "connection_attempt", attempt)
+	appLog.Debug("WireGuard peer configured", "public_key", connResp.ServerInfo.WGPubKey)
+	if session.Access != nil {
+		_, _ = apiRequestContext(ctx, "DELETE", "/"+session.Access.TeleportRequestID, session.DeviceToken, nil)
+		session.Access = nil
+	}
+
+	if flags.printConfig {
+		fmt.Print(conf)
+		return connectionAttemptResult{printedConfig: true}, nil
+	}
+
+	early.Stop()
+	tunnelStarted := time.Now()
+	err = runTunnel(ctx, tunnelParams{
+		priv:           priv,
+		port:           port,
+		endpoint:       endpoint,
+		connResp:       connResp,
+		stunSecret:     stunSecret,
+		stunSecretHash: stunSecretHash,
+		sockets:        sockets,
+		nomination:     nomination,
+		socks5Addr:     flags.socks5Addr,
+		debug:          flags.debug,
+		candidateQueue: candidateQueue,
+		candidateTypes: candidateTypes,
+	})
+	return connectionAttemptResult{
+		tunnelStarted:  true,
+		tunnelDuration: time.Since(tunnelStarted),
+	}, err
 }
 
 func validateLocalCandidates(local []candidate, family networkFamily) error {
@@ -235,17 +284,17 @@ func parseFlags() cliFlags {
 // given, or reconnects using a previously saved session file, mirroring how
 // the real client only redeems an invite once at add-device time and treats
 // every later launch as a reconnect using the previously granted session.
-func establishSession(flags cliFlags, fatal func(error)) sessionResult {
+func establishSession(ctx context.Context, flags cliFlags) (sessionResult, error) {
 	if flags.invite == "" {
 		// Reconnect: reuse a previously granted session, skipping REQUEST_ACCESS
 		// entirely, mirroring how the real client reconnects to an
 		// already-added device.
 		sess, err := loadSession(flags.sessionFile)
 		if err != nil {
-			fatal(fmt.Errorf("no --invite given and failed to load session from %s: %w (run once with --invite to pair)", flags.sessionFile, err))
+			return sessionResult{}, fmt.Errorf("no --invite given and failed to load session from %s: %w (run once with --invite to pair)", flags.sessionFile, err)
 		}
 		appLog.Info("reusing session", "path", flags.sessionFile, "saved_at", sess.SavedAt.Format(time.RFC3339))
-		return sessionResult{Token: sess.SessionToken, Secret: sess.SessionSecret}
+		return sessionResult{Token: sess.SessionToken, Secret: sess.SessionSecret}, nil
 	}
 
 	// Fresh pairing: redeem the invite once via REQUEST_ACCESS, then
@@ -258,24 +307,31 @@ func establishSession(flags cliFlags, fatal func(error)) sessionResult {
 	clientID := randomUUID()
 
 	accessBody := apiEnvelope{Token: token, Payload: map[string]interface{}{"request_type": "REQUEST_ACCESS", "secret": flags.invite, "client_id": clientID, "client_name": flags.name}}
-	access, err := apiRequest("POST", "/", "", accessBody)
-	fatal(err)
+	access, err := apiRequestContext(ctx, "POST", "/", "", accessBody)
+	if err != nil {
+		return sessionResult{}, err
+	}
 
-	poll, err := pollForResponse(token, access.TeleportRequestID, "ACCESS_GRANTED", 2*time.Second, 60, nil)
-	fatal(err)
+	poll, err := pollForResponseContext(ctx, token, access.TeleportRequestID, "ACCESS_GRANTED", 2*time.Second, 60, nil)
+	if err != nil {
+		return sessionResult{}, err
+	}
 	var sessionToken, sessionSecret string
 	if poll != nil {
 		sessionToken, sessionSecret = poll.Token, poll.Secret
 	}
 	if sessionToken == "" {
-		fatal(errors.New("timed out waiting for ACCESS_GRANTED"))
+		return sessionResult{}, errors.New("timed out waiting for ACCESS_GRANTED")
 	}
 	appLog.Info("access granted", "client_id", clientID)
 
-	if md, err := fetchMetadata(sessionToken); err == nil {
+	if md, err := fetchMetadataContext(ctx, sessionToken); err == nil {
 		appLog.Info("console metadata", "name", md.Metadata.Name, "wan_ip", md.Metadata.WanIP)
 	} else {
 		appLog.Warn("console metadata unavailable", "error", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return sessionResult{}, err
 	}
 
 	if flags.sessionFile != "" {
@@ -292,25 +348,29 @@ func establishSession(flags cliFlags, fatal func(error)) sessionResult {
 		}
 	}
 
-	return sessionResult{Token: sessionToken, Secret: sessionSecret, DeviceToken: token, Access: access}
+	return sessionResult{Token: sessionToken, Secret: sessionSecret, DeviceToken: token, Access: access}, nil
 }
 
-func fetchICEConfiguration(sessionToken, sessionSecret string, fatal func(error)) []iceServer {
+func fetchICEConfiguration(ctx context.Context, sessionToken, sessionSecret string) ([]iceServer, error) {
 	iceBody := apiEnvelope{Token: sessionToken, Payload: map[string]interface{}{"request_type": "GET_ICE_CONFIGURATION", "secret": sessionSecret}}
-	iceReq, err := apiRequest("POST", "/", "", iceBody)
-	fatal(err)
+	iceReq, err := apiRequestContext(ctx, "POST", "/", "", iceBody)
+	if err != nil {
+		return nil, err
+	}
 
-	poll, err := pollForResponse(sessionToken, iceReq.TeleportRequestID, "ICE_CONFIGURATION", responsePollInterval, 100, nil)
-	fatal(err)
+	poll, err := pollForResponseContext(ctx, sessionToken, iceReq.TeleportRequestID, "ICE_CONFIGURATION", responsePollInterval, 100, nil)
+	if err != nil {
+		return nil, err
+	}
 	var ice []iceServer
 	if poll != nil {
 		ice = poll.IceConfiguration
 	}
 	if len(ice) == 0 {
-		fatal(errors.New("timed out waiting for ICE_CONFIGURATION"))
+		return nil, errors.New("timed out waiting for ICE_CONFIGURATION")
 	}
-	_, _ = apiRequest("DELETE", "/"+iceReq.TeleportRequestID, sessionToken, nil)
-	return ice
+	_, _ = apiRequestContext(ctx, "DELETE", "/"+iceReq.TeleportRequestID, sessionToken, nil)
+	return ice, nil
 }
 
 // gatherLocalCandidates collects interface and server-reflexive candidates
@@ -346,7 +406,7 @@ func gatherLocalCandidates(sockets *udpSockets, port int, family networkFamily, 
 
 // connectAndAwaitResponse sends CONNECT with the gathered candidates and
 // polls for CONNECT_RESPONSE.
-func connectAndAwaitResponse(session sessionResult, name, pub, stunSecret string, local []candidate, ice []iceServer, early *earlyNominationListener, fatal func(error)) *apiResponse {
+func connectAndAwaitResponse(ctx context.Context, session sessionResult, name, pub, stunSecret string, local []candidate, ice []iceServer, early *earlyNominationListener) (*apiResponse, error) {
 	connectPayload := map[string]interface{}{
 		"request_type": "CONNECT",
 		"secret":       session.Secret,
@@ -357,10 +417,12 @@ func connectAndAwaitResponse(session sessionResult, name, pub, stunSecret string
 			"peer_desc":           peerDesc{Candidates: local, IceConfig: ice, IsMaster: false},
 		},
 	}
-	connectReq, err := apiRequest("POST", "/", "", apiEnvelope{Token: session.Token, Payload: connectPayload})
-	fatal(err)
+	connectReq, err := apiRequestContext(ctx, "POST", "/", "", apiEnvelope{Token: session.Token, Payload: connectPayload})
+	if err != nil {
+		return nil, err
+	}
 
-	connResp, err := pollForResponse(session.Token, connectReq.TeleportRequestID, "CONNECT_RESPONSE", responsePollInterval, 200, func() {
+	connResp, err := pollForResponseContext(ctx, session.Token, connectReq.TeleportRequestID, "CONNECT_RESPONSE", responsePollInterval, 200, func() {
 		select {
 		case nom := <-early.hints:
 			// The real endpoint/mode is recovered from early.Logs() below once
@@ -370,12 +432,14 @@ func connectAndAwaitResponse(session sessionResult, name, pub, stunSecret string
 		default:
 		}
 	})
-	fatal(err)
-	if connResp == nil {
-		fatal(errors.New("timed out waiting for CONNECT_RESPONSE"))
+	if err != nil {
+		return nil, err
 	}
-	_, _ = apiRequest("DELETE", "/"+connectReq.TeleportRequestID, session.Token, nil)
-	return connResp
+	if connResp == nil {
+		return nil, errors.New("timed out waiting for CONNECT_RESPONSE")
+	}
+	_, _ = apiRequestContext(ctx, "DELETE", "/"+connectReq.TeleportRequestID, session.Token, nil)
+	return connResp, nil
 }
 
 // negotiateEndpoint determines which candidate address to use as the
@@ -384,7 +448,7 @@ func connectAndAwaitResponse(session sessionResult, name, pub, stunSecret string
 // early listener, or — as a last resort — the late fallback listener in
 // waitForNomination. It also returns the ranked queue of candidates that sent
 // us a Binding Request, for the post-connect endpoint retry loop.
-func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, connResp *apiResponse, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate, fatal func(error)) (endpoint, mode string, candidateQueue []string, candidateTypes map[string]string) {
+func negotiateEndpoint(ctx context.Context, endpointOverride string, sockets *udpSockets, port int, connResp *apiResponse, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate) (endpoint, mode string, candidateQueue []string, candidateTypes map[string]string, err error) {
 	endpoint = endpointOverride
 	mode = "override"
 
@@ -395,12 +459,16 @@ func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, c
 	}
 
 	stopCandidateProbes := startPeerCandidateProbes(sockets, peerCandidates, stunSecretHash)
+	defer stopCandidateProbes()
 	if endpoint == "" {
 		// Activation allows a verified per-tuple sequence received before the
 		// response to select an endpoint. The Android bridge waits up to 40s.
 		nomination.activate()
 		appLog.Debug("waiting for per-tuple nomination", "timeout", "40s")
-		endpoint = nomination.waitForSelection(40 * time.Second)
+		endpoint = nomination.waitForSelection(ctx, 40*time.Second)
+		if err := ctx.Err(); err != nil {
+			return "", "", nil, nil, err
+		}
 		if endpoint != "" {
 			mode = "per_tuple_nomination"
 		} else {
@@ -425,19 +493,22 @@ func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, c
 		}
 		if endpoint == "" {
 			early.Stop()
-			selection := waitForNomination(sockets, port, peerCandidates, stunSecretHash, local)
+			selection := waitForNomination(ctx, sockets, port, peerCandidates, stunSecretHash, local)
+			if err := ctx.Err(); err != nil {
+				return "", "", nil, nil, err
+			}
 			endpoint = selection.Endpoint
 			mode = selection.Mode
 		}
 	}
 	stopCandidateProbes()
 	if endpoint == "" {
-		fatal(errors.New("no endpoint candidate available"))
+		return "", "", nil, nil, errors.New("no endpoint candidate available")
 	}
 	early.Stop()
 	candidateQueue = buildCandidateRetryQueue(endpoint, candidateQueue, compatibleCandidates(sockets, peerCandidates, local))
 	candidateTypes = candidateTypeMap(peerCandidates)
-	return endpoint, mode, candidateQueue, candidateTypes
+	return endpoint, mode, candidateQueue, candidateTypes, nil
 }
 
 // candidateTypeMap maps each advertised candidate's address to its type

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -192,6 +194,55 @@ func TestPollForResponseGivesUpAfterConsecutiveTransientErrors(t *testing.T) {
 	}
 	if calls != maxConsecutivePollErrors {
 		t.Fatalf("expected %d calls before giving up, got %d", maxConsecutivePollErrors, calls)
+	}
+}
+
+func TestPollForResponseStopsWhileWaitingWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var calls int
+	request := func(method, path, token string, body interface{}) (*apiResponse, error) {
+		calls++
+		return &apiResponse{}, nil
+	}
+
+	started := time.Now()
+	_, err := pollForResponseWithContext(ctx, request, "token", "req", "READY", time.Minute, 10, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("poll cancellation error = %v, want context.Canceled", err)
+	}
+	if calls != 0 {
+		t.Fatalf("request called %d times after cancellation, want 0", calls)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("poll cancellation took %v", elapsed)
+	}
+}
+
+func TestAPIRequestContextCancelsInFlightRequest(t *testing.T) {
+	requestStarted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := apiRequestAtContext(ctx, server.URL, http.MethodGet, "/", "", nil)
+		done <- err
+	}()
+	<-requestStarted
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("request cancellation error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("in-flight API request did not stop after cancellation")
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
@@ -197,7 +198,7 @@ func (t *nominationTracker) selectedEndpoint() string {
 	return t.selected
 }
 
-func (t *nominationTracker) waitForSelection(timeout time.Duration) string {
+func (t *nominationTracker) waitForSelection(ctx context.Context, timeout time.Duration) string {
 	if selected := t.selectedEndpoint(); selected != "" {
 		return selected
 	}
@@ -207,6 +208,8 @@ func (t *nominationTracker) waitForSelection(timeout time.Duration) string {
 	case <-t.selectedCh:
 		return t.selectedEndpoint()
 	case <-timer.C:
+		return ""
+	case <-ctx.Done():
 		return ""
 	}
 }
@@ -238,7 +241,11 @@ func stunBindingProbe(secHash string) ([]byte, [12]byte) {
 func startPeerCandidateProbes(s *udpSockets, candidates []candidate, secHash string) func() {
 	done := make(chan struct{})
 	var stopOnce sync.Once
-	stop := func() { stopOnce.Do(func() { close(done) }) }
+	var wg sync.WaitGroup
+	stop := func() {
+		stopOnce.Do(func() { close(done) })
+		wg.Wait()
+	}
 	if s == nil || len(candidates) == 0 {
 		return stop
 	}
@@ -250,7 +257,9 @@ func startPeerCandidateProbes(s *udpSockets, candidates []candidate, secHash str
 	}
 
 	send()
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		burstTicker := time.NewTicker(400 * time.Millisecond)
 		burstDeadline := time.NewTimer(5 * time.Second)
 	burst:
@@ -466,7 +475,7 @@ func acceptBindingSuccess(probed map[string][][12]byte, addr string, msg *stun.M
 	return false
 }
 
-func waitForNomination(s *udpSockets, port int, cands []candidate, sessionSecretHash string, local []candidate) endpointSelection {
+func waitForNomination(ctx context.Context, s *udpSockets, port int, cands []candidate, sessionSecretHash string, local []candidate) endpointSelection {
 	if s == nil {
 		return endpointSelection{}
 	}
@@ -546,6 +555,8 @@ func waitForNomination(s *udpSockets, port int, cands []candidate, sessionSecret
 	probed := map[string][][12]byte{}
 	for {
 		select {
+		case <-ctx.Done():
+			return endpointSelection{Packets: logs}
 		case pkt := <-packets:
 			logs = append(logs, logPacket("in", pkt.addr, pkt.data))
 			msg, ok := parseStunMessage(pkt.data)

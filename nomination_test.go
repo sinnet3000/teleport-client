@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"testing"
@@ -8,6 +9,20 @@ import (
 
 	"github.com/pion/stun"
 )
+
+func TestNominationWaitStopsWhenCanceled(t *testing.T) {
+	tracker := newNominationTracker()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := time.Now()
+	if endpoint := tracker.waitForSelection(ctx, time.Minute); endpoint != "" {
+		t.Fatalf("waitForSelection returned %q after cancellation", endpoint)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("nomination cancellation took %v", elapsed)
+	}
+}
 
 func TestInterfaceAddrIP(t *testing.T) {
 	ipv4 := net.ParseIP("192.0.2.10")

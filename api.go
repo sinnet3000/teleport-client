@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/base64"
@@ -139,10 +140,14 @@ func normalizeInviteSecret(value string) (string, error) {
 }
 
 func fetchMetadata(token string) (*metadataResponse, error) {
+	return fetchMetadataContext(context.Background(), token)
+}
+
+func fetchMetadataContext(ctx context.Context, token string) (*metadataResponse, error) {
 	started := time.Now()
 	appLog.Debug("API request", "method", http.MethodGet, "path", "/metadata")
 	urlStr := apiBase + "/metadata?token=" + url.QueryEscape(token)
-	req, err := http.NewRequest("GET", urlStr, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +156,9 @@ func fetchMetadata(token string) (*metadataResponse, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("api GET /metadata request canceled: %w", ctxErr)
+		}
 		return nil, fmt.Errorf("api GET /metadata request failed: %s", redactAPIError(err, token))
 	}
 	defer resp.Body.Close()
@@ -192,10 +200,18 @@ func isTransientAPIError(err error) bool {
 }
 
 func apiRequest(method, path, token string, body interface{}) (*apiResponse, error) {
-	return apiRequestAt(apiBase, method, path, token, body)
+	return apiRequestContext(context.Background(), method, path, token, body)
+}
+
+func apiRequestContext(ctx context.Context, method, path, token string, body interface{}) (*apiResponse, error) {
+	return apiRequestAtContext(ctx, apiBase, method, path, token, body)
 }
 
 func apiRequestAt(baseURL, method, path, token string, body interface{}) (*apiResponse, error) {
+	return apiRequestAtContext(context.Background(), baseURL, method, path, token, body)
+}
+
+func apiRequestAtContext(ctx context.Context, baseURL, method, path, token string, body interface{}) (*apiResponse, error) {
 	started := time.Now()
 	appLog.Debug("API request", "method", method, "path", path, "authenticated", token != "", "has_body", body != nil)
 	reqURL := baseURL + path
@@ -216,7 +232,7 @@ func apiRequestAt(baseURL, method, path, token string, body interface{}) (*apiRe
 		rdr = bytes.NewReader(buf)
 	}
 
-	req, err := http.NewRequest(method, reqURL, rdr)
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, rdr)
 	if err != nil {
 		return nil, err
 	}
@@ -225,6 +241,9 @@ func apiRequestAt(baseURL, method, path, token string, body interface{}) (*apiRe
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, &apiError{err: fmt.Errorf("api %s %s request canceled: %w", method, path, ctxErr)}
+		}
 		return nil, &apiError{err: fmt.Errorf("api %s %s request failed: %s", method, path, redactAPIError(err, token))}
 	}
 	defer resp.Body.Close()
@@ -261,11 +280,24 @@ func pollForResponse(token, requestID, want string, interval time.Duration, maxT
 	return pollForResponseWith(apiRequest, token, requestID, want, interval, maxTries, onTick)
 }
 
+func pollForResponseContext(ctx context.Context, token, requestID, want string, interval time.Duration, maxTries int, onTick func()) (*apiResponse, error) {
+	request := func(method, path, token string, body interface{}) (*apiResponse, error) {
+		return apiRequestContext(ctx, method, path, token, body)
+	}
+	return pollForResponseWithContext(ctx, request, token, requestID, want, interval, maxTries, onTick)
+}
+
 // pollForResponseWith takes the request function as a parameter for tests.
 func pollForResponseWith(request func(method, path, token string, body interface{}) (*apiResponse, error), token, requestID, want string, interval time.Duration, maxTries int, onTick func()) (*apiResponse, error) {
+	return pollForResponseWithContext(context.Background(), request, token, requestID, want, interval, maxTries, onTick)
+}
+
+func pollForResponseWithContext(ctx context.Context, request func(method, path, token string, body interface{}) (*apiResponse, error), token, requestID, want string, interval time.Duration, maxTries int, onTick func()) (*apiResponse, error) {
 	consecutiveErrors := 0
 	for i := 0; i < maxTries; i++ {
-		time.Sleep(interval)
+		if !waitForContext(ctx, interval) {
+			return nil, ctx.Err()
+		}
 		if onTick != nil {
 			onTick()
 		}
@@ -287,6 +319,17 @@ func pollForResponseWith(request func(method, path, token string, body interface
 		}
 	}
 	return nil, nil
+}
+
+func waitForContext(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func redactAPIError(err error, token string) string {
