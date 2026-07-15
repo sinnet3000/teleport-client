@@ -498,6 +498,9 @@ func waitForNomination(s *udpSockets, port int, cands []candidate, sessionSecret
 	tick := time.NewTicker(400 * time.Millisecond)
 	defer tick.Stop()
 	ordered := rankCandidates(cands)
+	for i, c := range ordered {
+		appLog.Debug("nomination candidate ranked", "rank", i, "type", c.Type, "address", c.Addr)
+	}
 	// probed tracks the transaction IDs of the stunRequests we've sent to
 	// each address; see acceptBindingSuccess.
 	probed := map[string][][12]byte{}
@@ -544,6 +547,7 @@ func waitForNomination(s *udpSockets, port int, cands []candidate, sessionSecret
 				addr := remote.String()
 				probed[addr] = append(probed[addr], tx)
 				logs = append(logs, logPacket("out", remote, req))
+				appLog.Debug("probed nomination candidate", "candidate", c.Addr, "type", c.Type)
 			}
 		case <-done:
 			stopReadLoops()
@@ -577,6 +581,7 @@ func rankCandidates(c []candidate) []candidate {
 
 func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string) string {
 	ordered := compatibleCandidates(s, cands)
+	appLog.Debug("fallback probe starting", "candidates", len(ordered))
 	for _, c := range ordered {
 		host, _, err := net.SplitHostPort(c.Addr)
 		if err != nil {
@@ -611,6 +616,7 @@ func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string)
 			// Stray packet from something other than this candidate; keep
 			// reading until the deadline instead of moving on immediately.
 		}
+		appLog.Debug("fallback probe result", "candidate", c.Addr, "matched", matched)
 		if matched {
 			return c.Addr
 		}

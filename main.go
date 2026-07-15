@@ -370,7 +370,13 @@ func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, c
 	endpoint = endpointOverride
 	mode = "override"
 
-	stopCandidateProbes := startPeerCandidateProbes(sockets, connResp.ServerInfo.PeerDesc.Candidates, stunSecretHash)
+	peerCandidates := connResp.ServerInfo.PeerDesc.Candidates
+	appLog.Info("peer candidates received", "count", len(peerCandidates))
+	for _, c := range peerCandidates {
+		appLog.Debug("peer candidate", "type", c.Type, "address", c.Addr)
+	}
+
+	stopCandidateProbes := startPeerCandidateProbes(sockets, peerCandidates, stunSecretHash)
 	if endpoint == "" {
 		// Activation allows a verified per-tuple sequence received before the
 		// response to select an endpoint. The Android bridge waits up to 40s.
@@ -398,7 +404,7 @@ func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, c
 		}
 		if endpoint == "" {
 			early.Stop()
-			selection := waitForNomination(sockets, port, connResp.ServerInfo.PeerDesc.Candidates, stunSecretHash)
+			selection := waitForNomination(sockets, port, peerCandidates, stunSecretHash)
 			endpoint = selection.Endpoint
 			mode = selection.Mode
 		}
