@@ -74,7 +74,7 @@ func main() {
 		early.Start()
 
 		connResp := connectAndAwaitResponse(session, flags.name, pub, stunSecret, local, ice, early, fatal)
-		endpoint, endpointMode, candidateQueue := negotiateEndpoint(flags.endpointOverride, sockets, port, connResp, stunSecretHash, nomination, early, local, fatal)
+		endpoint, endpointMode, candidateQueue, candidateTypes := negotiateEndpoint(flags.endpointOverride, sockets, port, connResp, stunSecretHash, nomination, early, local, fatal)
 
 		conf := buildConfig(priv, port, endpoint, connResp.ServerInfo, connResp.DNSAddrs, connResp.ClientIP)
 		appLog.Info("endpoint selected", "endpoint", endpoint, "mode", endpointMode, "connection_attempt", attempt)
@@ -104,6 +104,7 @@ func main() {
 			socks5Addr:     flags.socks5Addr,
 			debug:          flags.debug,
 			candidateQueue: candidateQueue,
+			candidateTypes: candidateTypes,
 		}, fatal)
 		sockets.Close()
 		if time.Since(tunnelStarted) >= 5*time.Minute {
@@ -383,7 +384,7 @@ func connectAndAwaitResponse(session sessionResult, name, pub, stunSecret string
 // early listener, or — as a last resort — the late fallback listener in
 // waitForNomination. It also returns the ranked queue of candidates that sent
 // us a Binding Request, for the post-connect endpoint retry loop.
-func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, connResp *apiResponse, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate, fatal func(error)) (endpoint, mode string, candidateQueue []string) {
+func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, connResp *apiResponse, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate, fatal func(error)) (endpoint, mode string, candidateQueue []string, candidateTypes map[string]string) {
 	endpoint = endpointOverride
 	mode = "override"
 
@@ -435,7 +436,20 @@ func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, c
 	}
 	early.Stop()
 	candidateQueue = buildCandidateRetryQueue(endpoint, candidateQueue, compatibleCandidates(sockets, peerCandidates, local))
-	return endpoint, mode, candidateQueue
+	candidateTypes = candidateTypeMap(peerCandidates)
+	return endpoint, mode, candidateQueue, candidateTypes
+}
+
+// candidateTypeMap maps each advertised candidate's address to its type
+// (iface/reflex/turn) so the retry loop can size its per-candidate patience
+// to how likely that address is to still be establishing a path (e.g. a TURN
+// relay allocation) versus simply dead.
+func candidateTypeMap(peerCandidates []candidate) map[string]string {
+	types := make(map[string]string, len(peerCandidates))
+	for _, c := range peerCandidates {
+		types[c.Addr] = c.Type
+	}
+	return types
 }
 
 // buildCandidateRetryQueue preserves candidates that actually reached us

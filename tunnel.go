@@ -28,6 +28,7 @@ type tunnelParams struct {
 	socks5Addr     string
 	debug          bool
 	candidateQueue []string
+	candidateTypes map[string]string
 }
 
 const (
@@ -36,10 +37,20 @@ const (
 	endpointRecoveryMaxBackoff     = 30 * time.Second
 	endpointRecoveryRounds         = 2
 
-	// candidateHandshakeTimeout covers one WireGuard handshake retry cycle (5s).
+	// privateCandidateHandshakeTimeout covers a private/link-local guess: it's
+	// either reachable almost immediately or it's simply not on our LAN.
+	privateCandidateHandshakeTimeout = 3 * time.Second
+	// candidateHandshakeTimeout covers one WireGuard handshake retry cycle (5s)
+	// for a public reflexive/observed candidate.
 	candidateHandshakeTimeout = 6 * time.Second
-	// candidateRetryMaxDuration is a backstop; queue exhaustion is the usual exit.
-	candidateRetryMaxDuration = 40 * time.Second
+	// relayCandidateHandshakeTimeout gives a TURN relay candidate real patience:
+	// relay allocation/permissions and a relayed round trip can legitimately
+	// take longer than a direct check-in, and TURN is the intended fallback
+	// when direct traversal fails, not just another guess to burn through.
+	relayCandidateHandshakeTimeout = 25 * time.Second
+	// candidateRetryMaxDuration is a backstop; queue exhaustion is the usual
+	// exit. Sized to fit one full relay dwell plus a few fast candidates.
+	candidateRetryMaxDuration = 60 * time.Second
 )
 
 var errTunnelRenegotiationRequired = errors.New("known WireGuard endpoints exhausted; fresh Teleport negotiation required")
@@ -114,7 +125,7 @@ func runTunnel(p tunnelParams, fatal func(error)) error {
 	appLog.Debug("WireGuard device started", "endpoint", p.endpoint)
 	renegotiate := make(chan struct{}, 1)
 	if len(p.candidateQueue) > 0 || p.nomination != nil {
-		go retryEndpointOnHandshakeTimeout(lifecycleCtx, dev, peerPubHex, p.endpoint, p.candidateQueue, p.nomination, p.sockets, p.stunSecretHash, renegotiate)
+		go retryEndpointOnHandshakeTimeout(lifecycleCtx, dev, peerPubHex, p.endpoint, p.candidateQueue, p.candidateTypes, p.nomination, p.sockets, p.stunSecretHash, renegotiate)
 	}
 	echoStopped := make(chan error, 1)
 	healthEvents := make(chan udpEchoHealthEvent)
@@ -295,11 +306,26 @@ func waitForRecovery(ctx context.Context, duration time.Duration) bool {
 	}
 }
 
+// candidateDwell sizes how long a candidate gets before the retry loop moves
+// on: TURN relay candidates get relayCandidateHandshakeTimeout (they're the
+// intended fallback, not a guess), private/link-local addresses get
+// privateCandidateHandshakeTimeout (dead-or-alive almost immediately), and
+// everything else (public reflexive/observed) gets candidateHandshakeTimeout.
+func candidateDwell(addr string, candidateTypes map[string]string) time.Duration {
+	if candidateTypes[addr] == "turn" {
+		return relayCandidateHandshakeTimeout
+	}
+	if isPubliclyRoutableCandidateAddr(addr) {
+		return candidateHandshakeTimeout
+	}
+	return privateCandidateHandshakeTimeout
+}
+
 // retryEndpointOnHandshakeTimeout switches the WireGuard peer to the next
 // queued candidate if the current endpoint hasn't completed a handshake
-// within candidateHandshakeTimeout, giving up after candidateRetryMaxDuration
-// or once the queue is exhausted.
-func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, peerPubHex, currentEndpoint string, candidateQueue []string, nomination *nominationTracker, sockets *udpSockets, stunSecretHash string, exhausted chan<- struct{}) {
+// within its candidateDwell, giving up after candidateRetryMaxDuration or
+// once the queue is exhausted.
+func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, peerPubHex, currentEndpoint string, candidateQueue []string, candidateTypes map[string]string, nomination *nominationTracker, sockets *udpSockets, stunSecretHash string, exhausted chan<- struct{}) {
 	queueIdx := 0
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -361,7 +387,7 @@ func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, pe
 			return
 		}
 
-		if time.Since(lastSwitchTime) >= candidateHandshakeTimeout {
+		if time.Since(lastSwitchTime) >= candidateDwell(currentEndpoint, candidateTypes) {
 			nextCandidateAddr, nextIdx, ok := nextEndpointCandidate(candidateQueue, queueIdx, currentEndpoint)
 			queueIdx = nextIdx
 			if ok {
