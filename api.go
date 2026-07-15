@@ -358,24 +358,18 @@ func debugAPIErrorResponse(logger *appLogger, method, path string, data []byte, 
 
 // walkSensitiveValue recurses through a JSON-decoded value for collectSensitiveStrings,
 // calling visit on every string leaf with whether it's under a key sensitiveLogKey flags.
-func walkSensitiveValue(value any, sensitiveParent bool, visit func(s string, sensitive bool) string) any {
+func walkSensitiveValue(value any, sensitiveParent bool, visit func(s string, sensitive bool)) {
 	switch value := value.(type) {
 	case map[string]any:
-		out := make(map[string]any, len(value))
 		for key, child := range value {
-			out[key] = walkSensitiveValue(child, sensitiveParent || sensitiveLogKey(key), visit)
+			walkSensitiveValue(child, sensitiveParent || sensitiveLogKey(key), visit)
 		}
-		return out
 	case []any:
-		out := make([]any, len(value))
-		for i, child := range value {
-			out[i] = walkSensitiveValue(child, sensitiveParent, visit)
+		for _, child := range value {
+			walkSensitiveValue(child, sensitiveParent, visit)
 		}
-		return out
 	case string:
-		return visit(value, sensitiveParent)
-	default:
-		return value
+		visit(value, sensitiveParent)
 	}
 }
 
@@ -430,11 +424,10 @@ func collectSensitiveStrings(value any) []string {
 		return nil
 	}
 	var secrets []string
-	walkSensitiveValue(decoded, false, func(s string, sensitive bool) string {
+	walkSensitiveValue(decoded, false, func(s string, sensitive bool) {
 		if sensitive && s != "" {
 			secrets = append(secrets, s)
 		}
-		return s
 	})
 	return secrets
 }
