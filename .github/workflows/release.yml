@@ -29,6 +29,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           BINARY=teleport-client
+          VERSION_NAME=${VERSION#v}
           COMMIT=${GITHUB_SHA::8}
           BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}"
@@ -52,7 +53,7 @@ jobs:
           for platform in "${platforms[@]}"; do
             OS=$(echo $platform | cut -f1 -d'/')
             ARCH=$(echo $platform | cut -f2 -d'/')
-            OUTPUT="${BINARY}_${OS}_${ARCH}"
+            OUTPUT="${BINARY}_${VERSION_NAME}_${OS}_${ARCH}"
 
             if [ "$OS" = "windows" ]; then
               OUTPUT="${OUTPUT}.exe"

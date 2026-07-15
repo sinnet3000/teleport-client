@@ -6,6 +6,7 @@ BINARY=teleport-client
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_DATE := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+BINARY_VERSION := $(patsubst v%,%,$(VERSION))
 
 # Build flags
 LDFLAGS=-ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}"
@@ -27,9 +28,9 @@ build:
 		ARCH=$$(echo $$platform | cut -f2 -d'/'); \
 		echo "Building for $$OS/$$ARCH..."; \
 		if [ "$$OS" = "windows" ]; then \
-			GOOS=$$OS GOARCH=$$ARCH go build ${LDFLAGS} -o ${DIST_DIR}/${BINARY}_$${OS}_$${ARCH}.exe .; \
+			GOOS=$$OS GOARCH=$$ARCH go build ${LDFLAGS} -o ${DIST_DIR}/${BINARY}_${BINARY_VERSION}_$${OS}_$${ARCH}.exe .; \
 		else \
-			GOOS=$$OS GOARCH=$$ARCH go build ${LDFLAGS} -o ${DIST_DIR}/${BINARY}_$${OS}_$${ARCH} .; \
+			GOOS=$$OS GOARCH=$$ARCH go build ${LDFLAGS} -o ${DIST_DIR}/${BINARY}_${BINARY_VERSION}_$${OS}_$${ARCH} .; \
 		fi; \
 	done
 	@echo "Build complete! Binaries are in ${DIST_DIR}/"
