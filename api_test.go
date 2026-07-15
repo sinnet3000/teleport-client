@@ -21,7 +21,7 @@ func TestAPIRequestRejectsEmptyErrorResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if _, err := apiRequestAt(server.URL, http.MethodGet, "/", "", nil); err == nil {
+	if _, err := apiRequestContext(context.Background(), server.URL, http.MethodGet, "/", "", nil); err == nil {
 		t.Fatal("apiRequest accepted an empty HTTP error response")
 	}
 }
@@ -153,7 +153,7 @@ func TestPollForResponseRetriesTransientThenSucceeds(t *testing.T) {
 		return &apiResponse{ResponseType: "READY"}, nil
 	}
 
-	poll, err := pollForResponseWith(request, "token", "req", "READY", time.Millisecond, 10, nil)
+	poll, err := pollForResponseWithContext(context.Background(), request, "token", "req", "READY", time.Millisecond, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestPollForResponseFailsFastOnPermanentError(t *testing.T) {
 		return nil, &apiError{StatusCode: http.StatusUnauthorized, err: fmt.Errorf("unauthorized")}
 	}
 
-	_, err := pollForResponseWith(request, "token", "req", "READY", time.Millisecond, 10, nil)
+	_, err := pollForResponseWithContext(context.Background(), request, "token", "req", "READY", time.Millisecond, 10, nil)
 	if err == nil {
 		t.Fatal("expected permanent error to be returned")
 	}
@@ -188,7 +188,7 @@ func TestPollForResponseGivesUpAfterConsecutiveTransientErrors(t *testing.T) {
 		return nil, &apiError{StatusCode: http.StatusServiceUnavailable, err: fmt.Errorf("unavailable")}
 	}
 
-	_, err := pollForResponseWith(request, "token", "req", "READY", time.Millisecond, 100, nil)
+	_, err := pollForResponseWithContext(context.Background(), request, "token", "req", "READY", time.Millisecond, 100, nil)
 	if err == nil {
 		t.Fatal("expected error after exceeding consecutive transient failures")
 	}
@@ -230,7 +230,7 @@ func TestAPIRequestContextCancelsInFlightRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := apiRequestAtContext(ctx, server.URL, http.MethodGet, "/", "", nil)
+		_, err := apiRequestContext(ctx, server.URL, http.MethodGet, "/", "", nil)
 		done <- err
 	}()
 	<-requestStarted

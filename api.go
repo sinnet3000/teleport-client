@@ -199,19 +199,7 @@ func isTransientAPIError(err error) bool {
 	return false
 }
 
-func apiRequest(method, path, token string, body interface{}) (*apiResponse, error) {
-	return apiRequestContext(context.Background(), method, path, token, body)
-}
-
-func apiRequestContext(ctx context.Context, method, path, token string, body interface{}) (*apiResponse, error) {
-	return apiRequestAtContext(ctx, apiBase, method, path, token, body)
-}
-
-func apiRequestAt(baseURL, method, path, token string, body interface{}) (*apiResponse, error) {
-	return apiRequestAtContext(context.Background(), baseURL, method, path, token, body)
-}
-
-func apiRequestAtContext(ctx context.Context, baseURL, method, path, token string, body interface{}) (*apiResponse, error) {
+func apiRequestContext(ctx context.Context, baseURL, method, path, token string, body interface{}) (*apiResponse, error) {
 	started := time.Now()
 	appLog.Debug("API request", "method", method, "path", path, "authenticated", token != "", "has_body", body != nil)
 	reqURL := baseURL + path
@@ -271,27 +259,18 @@ func apiRequestAtContext(ctx context.Context, baseURL, method, path, token strin
 // maxConsecutivePollErrors caps retries of transient failures before giving up.
 const maxConsecutivePollErrors = 5
 
-// pollForResponse polls GET /<requestID> every interval, up to maxTries
-// times, until a poll's response_type equals want. It returns nil, nil if
-// want never arrived within maxTries. onTick, if non-nil, runs once per
-// iteration before the poll request, for callers that need to check other
-// channels while waiting.
-func pollForResponse(token, requestID, want string, interval time.Duration, maxTries int, onTick func()) (*apiResponse, error) {
-	return pollForResponseWith(apiRequest, token, requestID, want, interval, maxTries, onTick)
-}
-
-func pollForResponseContext(ctx context.Context, token, requestID, want string, interval time.Duration, maxTries int, onTick func()) (*apiResponse, error) {
-	request := func(method, path, token string, body interface{}) (*apiResponse, error) {
-		return apiRequestContext(ctx, method, path, token, body)
+// apiRequestFunc adapts apiRequestContext to a fixed context and base URL for injection into pollForResponseWithContext.
+func apiRequestFunc(ctx context.Context) func(method, path, token string, body interface{}) (*apiResponse, error) {
+	return func(method, path, token string, body interface{}) (*apiResponse, error) {
+		return apiRequestContext(ctx, apiBase, method, path, token, body)
 	}
-	return pollForResponseWithContext(ctx, request, token, requestID, want, interval, maxTries, onTick)
 }
 
-// pollForResponseWith takes the request function as a parameter for tests.
-func pollForResponseWith(request func(method, path, token string, body interface{}) (*apiResponse, error), token, requestID, want string, interval time.Duration, maxTries int, onTick func()) (*apiResponse, error) {
-	return pollForResponseWithContext(context.Background(), request, token, requestID, want, interval, maxTries, onTick)
-}
-
+// pollForResponseWithContext polls GET /<requestID> every interval, up to
+// maxTries times, until a poll's response_type equals want. It returns nil,
+// nil if want never arrived within maxTries. onTick, if non-nil, runs once
+// per iteration before the poll request, for callers that need to check
+// other channels while waiting. request is injected so tests can stub it.
 func pollForResponseWithContext(ctx context.Context, request func(method, path, token string, body interface{}) (*apiResponse, error), token, requestID, want string, interval time.Duration, maxTries int, onTick func()) (*apiResponse, error) {
 	consecutiveErrors := 0
 	for i := 0; i < maxTries; i++ {
@@ -377,6 +356,32 @@ func debugAPIErrorResponse(logger *appLogger, method, path string, data []byte, 
 	logger.Debug("API error response", "method", method, "path", path, "detail", detail)
 }
 
+// walkSensitiveValue recurses through a JSON-decoded value for collectSensitiveStrings,
+// calling visit on every string leaf with whether it's under a key sensitiveLogKey flags.
+func walkSensitiveValue(value any, sensitiveParent bool, visit func(s string, sensitive bool) string) any {
+	switch value := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(value))
+		for key, child := range value {
+			out[key] = walkSensitiveValue(child, sensitiveParent || sensitiveLogKey(key), visit)
+		}
+		return out
+	case []any:
+		out := make([]any, len(value))
+		for i, child := range value {
+			out[i] = walkSensitiveValue(child, sensitiveParent, visit)
+		}
+		return out
+	case string:
+		return visit(value, sensitiveParent)
+	default:
+		return value
+	}
+}
+
+// redactAPIValue collapses an entire subtree under a sensitive key to
+// redactedLogValue rather than recursing into it, so nested key names don't
+// leak alongside the (already redacted) values.
 func redactAPIValue(value any, knownSecrets []string) any {
 	switch value := value.(type) {
 	case map[string]any:
@@ -425,32 +430,11 @@ func collectSensitiveStrings(value any) []string {
 		return nil
 	}
 	var secrets []string
-	var walk func(any, bool)
-	walk = func(value any, sensitiveParent bool) {
-		switch value := value.(type) {
-		case map[string]any:
-			for key, child := range value {
-				sensitive := sensitiveParent || sensitiveLogKey(key)
-				if text, ok := child.(string); ok {
-					if sensitive && text != "" {
-						secrets = append(secrets, text)
-					}
-					continue
-				}
-				walk(child, sensitive)
-			}
-		case []any:
-			for _, child := range value {
-				if text, ok := child.(string); ok {
-					if sensitiveParent && text != "" {
-						secrets = append(secrets, text)
-					}
-					continue
-				}
-				walk(child, sensitiveParent)
-			}
+	walkSensitiveValue(decoded, false, func(s string, sensitive bool) string {
+		if sensitive && s != "" {
+			secrets = append(secrets, s)
 		}
-	}
-	walk(decoded, false)
+		return s
+	})
 	return secrets
 }
