@@ -1,11 +1,14 @@
 # Binary name
 BINARY=teleport-client
 
-# Version information
-VERSION=v0.1.1
+# Build metadata. Tagged builds report the tag; local builds report the
+# distance from the latest tag and a dirty suffix when tracked files change.
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_DATE := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # Build flags
-LDFLAGS=-ldflags "-X main.version=${VERSION}"
+LDFLAGS=-ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}"
 
 # Platforms
 PLATFORMS=linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64 windows/amd64 freebsd/amd64 freebsd/arm64 openbsd/amd64 openbsd/arm64
@@ -13,7 +16,7 @@ PLATFORMS=linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64 windows/am
 # Output directories
 DIST_DIR=bin
 
-.PHONY: all build clean test vet help
+.PHONY: all build clean test vet version help
 
 all: clean build
 
@@ -36,6 +39,9 @@ test:
 
 vet:
 	go vet ./...
+
+version:
+	@printf 'version=%s commit=%s build_date=%s\n' "${VERSION}" "${COMMIT}" "${BUILD_DATE}"
 
 clean:
 	@rm -rf ${DIST_DIR}

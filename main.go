@@ -13,7 +13,13 @@ import (
 	"time"
 )
 
-var version = "v0.1.2"
+// These values are replaced by release/build ldflags. The defaults keep local
+// `go run` and unconfigured development builds explicit about their identity.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = ""
+)
 
 // responsePollInterval is the poll interval Teleport's console-facing
 // request/poll/delete cycle uses once past the initial ACCESS_GRANTED wait.
