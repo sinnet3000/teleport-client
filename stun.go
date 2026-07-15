@@ -89,6 +89,10 @@ func reflexiveCandidateFromConn(conn *net.UDPConn, ice []iceServer, family netwo
 	}
 	addr, err := net.ResolveUDPAddr(network, stunServer)
 	if err != nil {
+		var dnsErr *net.DNSError
+		if family == familyIPv6 && errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			return candidate{}, fmt.Errorf("STUN host %s has no AAAA record: %w", stunServer, err)
+		}
 		return candidate{}, err
 	}
 	req, _ := stunRequest()
