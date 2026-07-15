@@ -22,12 +22,26 @@ func udpConnPair(t *testing.T) (client *net.UDPConn, server *net.UDPConn) {
 	return client, server
 }
 
+// withFastEchoTimeouts shrinks the package-level deadline vars for the
+// duration of a test and restores them afterward.
+func withFastEchoTimeouts(t *testing.T) {
+	t.Helper()
+	origDeadline, origRetry, origCeiling := steadyStateEchoDeadline, startupRetryInterval, startupCeiling
+	steadyStateEchoDeadline = 20 * time.Millisecond
+	startupRetryInterval = 20 * time.Millisecond
+	startupCeiling = 100 * time.Millisecond
+	t.Cleanup(func() {
+		steadyStateEchoDeadline, startupRetryInterval, startupCeiling = origDeadline, origRetry, origCeiling
+	})
+}
+
 func TestWaitForStartupResponseSurvivesInitialTimeout(t *testing.T) {
+	withFastEchoTimeouts(t)
 	client, server := udpConnPair(t)
 	started := time.Now()
 
 	go func() {
-		time.Sleep(startupRetryInterval + 500*time.Millisecond)
+		time.Sleep(startupRetryInterval + 10*time.Millisecond)
 		peer, _ := net.ResolveUDPAddr("udp4", client.LocalAddr().String())
 		_, _ = server.WriteToUDP([]byte(`{"req_id":"0"}`), peer)
 	}()
@@ -41,7 +55,23 @@ func TestWaitForStartupResponseSurvivesInitialTimeout(t *testing.T) {
 	}
 }
 
+func TestWaitForStartupResponseFailsFastOnHardError(t *testing.T) {
+	withFastEchoTimeouts(t)
+	client, _ := udpConnPair(t)
+	client.Close()
+
+	buf := make([]byte, 2048)
+	start := time.Now()
+	if waitForStartupResponse(client, buf, 0, "0", start) {
+		t.Fatal("expected startup wait on a closed connection to fail")
+	}
+	if elapsed := time.Since(start); elapsed >= startupCeiling {
+		t.Fatalf("hard error should fail fast, not spin until the ceiling: %v", elapsed)
+	}
+}
+
 func TestWaitForSteadyStateResponseTimesOutOnce(t *testing.T) {
+	withFastEchoTimeouts(t)
 	client, _ := udpConnPair(t)
 	start := time.Now()
 	buf := make([]byte, 2048)

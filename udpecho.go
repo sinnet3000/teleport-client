@@ -14,14 +14,15 @@ import (
 
 const udpEchoSummaryInterval = 30 * time.Second
 
-// steadyStateEchoDeadline applies to request 1+.
-const steadyStateEchoDeadline = 3 * time.Second
-
-// startupRetryInterval is the re-armed wait step for request 0.
-const startupRetryInterval = 3 * time.Second
-
-// startupCeiling spans roughly two WireGuard handshake retries.
-const startupCeiling = 25 * time.Second
+// Overridable in tests to avoid multi-second real sleeps.
+var (
+	// steadyStateEchoDeadline applies to request 1+.
+	steadyStateEchoDeadline = 3 * time.Second
+	// startupRetryInterval is the re-armed wait step for request 0.
+	startupRetryInterval = 3 * time.Second
+	// startupCeiling spans roughly two WireGuard handshake retries.
+	startupCeiling = 25 * time.Second
+)
 
 type udpEchoStats struct {
 	windowStart time.Time
@@ -123,6 +124,11 @@ func runUDPEchoPinger(tunnelNet *netstack.Net, secret string, info serverInfo) {
 	}
 }
 
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
 // waitForSteadyStateResponse waits a single steadyStateEchoDeadline for a
 // reply matching wantID, discarding anything else.
 func waitForSteadyStateResponse(conn net.Conn, buf []byte, requestID int, wantID string) bool {
@@ -131,7 +137,11 @@ func waitForSteadyStateResponse(conn net.Conn, buf []byte, requestID int, wantID
 		_ = conn.SetReadDeadline(deadline)
 		n, err := conn.Read(buf)
 		if err != nil {
-			appLog.Warn("UDP echo request timed out", "request_id", requestID, "error", err)
+			if isTimeout(err) {
+				appLog.Warn("UDP echo request timed out", "request_id", requestID, "error", err)
+			} else {
+				appLog.Error("UDP echo read failed", "request_id", requestID, "error", err)
+			}
 			return false
 		}
 		responseID, err := parseUDPEchoResponse(buf[:n])
@@ -165,6 +175,10 @@ func waitForStartupResponse(conn net.Conn, buf []byte, requestID int, wantID str
 		_ = conn.SetReadDeadline(deadline)
 		n, err := conn.Read(buf)
 		if err != nil {
+			if !isTimeout(err) {
+				appLog.Error("UDP echo startup probe failed", "request_id", requestID, "error", err)
+				return false
+			}
 			appLog.Debug("UDP echo startup probe still waiting", "request_id", requestID, "elapsed", time.Since(started).Round(time.Second))
 			continue
 		}
