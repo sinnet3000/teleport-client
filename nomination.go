@@ -245,28 +245,7 @@ func startPeerCandidateProbes(s *udpSockets, candidates []candidate, secHash str
 
 	send := func() {
 		for _, candidate := range candidates {
-			host, _, err := net.SplitHostPort(candidate.Addr)
-			if err != nil {
-				continue
-			}
-			ip := net.ParseIP(strings.Trim(host, "[]"))
-			if ip == nil {
-				continue
-			}
-			conn, network := s.V6, "udp6"
-			if ip.To4() != nil {
-				conn, network = s.V4, "udp4"
-			}
-			if conn == nil {
-				continue
-			}
-			remote, err := net.ResolveUDPAddr(network, candidate.Addr)
-			if err != nil {
-				continue
-			}
-			probe, _ := stunBindingProbe(secHash)
-			_, _ = conn.WriteToUDP(probe, remote)
-			appLog.Debug("sent candidate STUN probe", "candidate", candidate.Addr, "network", network)
+			sendPeerCandidateProbe(s, candidate.Addr, secHash)
 		}
 	}
 
@@ -301,6 +280,41 @@ func startPeerCandidateProbes(s *udpSockets, candidates []candidate, secHash str
 		}
 	}()
 	return stop
+}
+
+// sendPeerCandidateProbe refreshes the candidate's exact NAT/relay tuple and
+// gives the console another authenticated STUN packet to answer before a
+// WireGuard handshake is attempted on that endpoint.
+func sendPeerCandidateProbe(s *udpSockets, addr, secHash string) bool {
+	if s == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	conn, network := s.V6, "udp6"
+	if ip.To4() != nil {
+		conn, network = s.V4, "udp4"
+	}
+	if conn == nil {
+		return false
+	}
+	remote, err := net.ResolveUDPAddr(network, addr)
+	if err != nil {
+		return false
+	}
+	probe, _ := stunBindingProbe(secHash)
+	if _, err := conn.WriteToUDP(probe, remote); err != nil {
+		appLog.Debug("candidate STUN probe failed", "candidate", addr, "network", network, "error", err)
+		return false
+	}
+	appLog.Debug("sent candidate STUN probe", "candidate", addr, "network", network)
+	return true
 }
 
 // nominationHint is an early, unverified signal that a candidate address may

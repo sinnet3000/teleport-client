@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -20,9 +21,13 @@ var (
 	steadyStateEchoDeadline = 3 * time.Second
 	// startupRetryInterval is the re-armed wait step for request 0.
 	startupRetryInterval = 3 * time.Second
-	// startupCeiling spans roughly two WireGuard handshake retries.
-	startupCeiling = 25 * time.Second
+	// startupCeiling covers the complete endpoint candidate retry window.
+	startupCeiling = 95 * time.Second
 )
+
+// A sustained minute without a response after the tunnel was ready is long
+// enough to distinguish endpoint/session loss from a brief network stall.
+const maxConsecutiveEchoFailures = 12
 
 type udpEchoStats struct {
 	windowStart time.Time
@@ -30,6 +35,37 @@ type udpEchoStats struct {
 	total       time.Duration
 	min         time.Duration
 	max         time.Duration
+}
+
+type udpEchoHealth struct {
+	ready               bool
+	consecutiveFailures int
+}
+
+type udpEchoHealthEvent int
+
+const (
+	udpEchoHealthy udpEchoHealthEvent = iota + 1
+	udpEchoStartupFailed
+	udpEchoUnhealthy
+)
+
+func (h *udpEchoHealth) observe(matched bool) (event udpEchoHealthEvent, firstSuccess bool) {
+	if matched {
+		firstSuccess = !h.ready
+		h.ready = true
+		h.consecutiveFailures = 0
+		return udpEchoHealthy, firstSuccess
+	}
+	if !h.ready {
+		return udpEchoStartupFailed, false
+	}
+	h.consecutiveFailures++
+	if h.consecutiveFailures >= maxConsecutiveEchoFailures {
+		h.consecutiveFailures = 0
+		return udpEchoUnhealthy, false
+	}
+	return 0, false
 }
 
 func (s *udpEchoStats) observe(now time.Time, rtt time.Duration) bool {
@@ -59,21 +95,19 @@ func (s *udpEchoStats) logAndReset(now time.Time) {
 
 // runUDPEchoPinger sends Teleport's post-activation quality probe through the
 // WireGuard netstack to the server-provided UDP echo endpoint.
-func runUDPEchoPinger(tunnelNet *netstack.Net, secret string, info serverInfo) {
+func runUDPEchoPinger(ctx context.Context, tunnelNet *netstack.Net, secret string, info serverInfo, healthEvents chan<- udpEchoHealthEvent) error {
 	if tunnelNet == nil || info.UDPEchoAddr == "" || info.UDPEchoPort == 0 {
 		appLog.Warn("UDP echo unavailable", "reason", "server supplied no echo endpoint")
-		return
+		return nil
 	}
 
 	remote := &net.UDPAddr{IP: net.ParseIP(info.UDPEchoAddr), Port: info.UDPEchoPort}
 	if remote.IP == nil {
-		appLog.Error("invalid UDP echo endpoint", "address", info.UDPEchoAddr)
-		return
+		return fmt.Errorf("invalid UDP echo endpoint %q", info.UDPEchoAddr)
 	}
 	conn, err := tunnelNet.DialUDP(nil, remote)
 	if err != nil {
-		appLog.Error("failed to dial UDP echo endpoint", "endpoint", remote.String(), "error", err)
-		return
+		return fmt.Errorf("dial UDP echo endpoint %s: %w", remote, err)
 	}
 	defer conn.Close()
 
@@ -81,8 +115,13 @@ func runUDPEchoPinger(tunnelNet *netstack.Net, secret string, info serverInfo) {
 	secretHash := base64.StdEncoding.EncodeToString(digest[:])
 	buf := make([]byte, 2048)
 	stats := udpEchoStats{}
-	tunnelReadyLogged := false
+	health := udpEchoHealth{}
 	for requestID := 0; ; requestID++ {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
 		request := struct {
 			SessionSecretHash string `json:"session_secret_hash"`
 			RequestID         string `json:"req_id"`
@@ -90,37 +129,51 @@ func runUDPEchoPinger(tunnelNet *netstack.Net, secret string, info serverInfo) {
 		}{secretHash, fmt.Sprint(requestID), 3000}
 		payload, err := json.Marshal(request)
 		if err != nil {
-			appLog.Error("failed to marshal UDP echo request", "error", err)
-			return
+			return fmt.Errorf("marshal UDP echo request: %w", err)
 		}
 
 		started := time.Now()
 		if _, err := conn.Write(payload); err != nil {
-			appLog.Error("failed to write UDP echo request", "request_id", requestID, "error", err)
-			return
+			return fmt.Errorf("write UDP echo request %d: %w", requestID, err)
 		}
 		appLog.Debug("sent UDP echo request", "request_id", requestID, "endpoint", remote.String())
 
 		var matched bool
 		if requestID == 0 {
-			matched = waitForStartupResponse(conn, buf, requestID, request.RequestID, started)
+			matched = waitForStartupResponse(conn, buf, requestID, request.RequestID, started, func() error {
+				_, err := conn.Write(payload)
+				return err
+			})
 		} else {
 			matched = waitForSteadyStateResponse(conn, buf, requestID, request.RequestID)
 		}
 
+		event, firstSuccess := health.observe(matched)
+		if event != 0 && healthEvents != nil {
+			select {
+			case healthEvents <- event:
+			case <-ctx.Done():
+				return nil
+			}
+		}
 		if matched {
 			now := time.Now()
 			rtt := now.Sub(started)
 			appLog.Debug("received UDP echo response", "request_id", requestID, "rtt", rtt.Round(time.Millisecond))
-			if !tunnelReadyLogged {
+			if firstSuccess {
 				appLog.Info("WireGuard tunnel ready", "initial_echo_rtt", rtt.Round(time.Millisecond))
-				tunnelReadyLogged = true
 			}
 			if stats.observe(now, rtt) {
 				stats.logAndReset(now)
 			}
 		}
-		time.Sleep(2 * time.Second)
+		timer := time.NewTimer(2 * time.Second)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		}
 	}
 }
 
@@ -160,7 +213,7 @@ func waitForSteadyStateResponse(conn net.Conn, buf []byte, requestID int, wantID
 // waitForStartupResponse re-arms the read deadline instead of giving up
 // after one timeout, so a reply delayed by a WireGuard handshake retry
 // still matches request 0 rather than being discarded as stale.
-func waitForStartupResponse(conn net.Conn, buf []byte, requestID int, wantID string, started time.Time) bool {
+func waitForStartupResponse(conn net.Conn, buf []byte, requestID int, wantID string, started time.Time, resend func() error) bool {
 	ceiling := started.Add(startupCeiling)
 	for {
 		now := time.Now()
@@ -180,6 +233,13 @@ func waitForStartupResponse(conn net.Conn, buf []byte, requestID int, wantID str
 				return false
 			}
 			appLog.Debug("UDP echo startup probe still waiting", "request_id", requestID, "elapsed", time.Since(started).Round(time.Second))
+			if resend != nil {
+				if err := resend(); err != nil {
+					appLog.Error("UDP echo startup probe resend failed", "request_id", requestID, "error", err)
+					return false
+				}
+				appLog.Debug("resent UDP echo startup probe", "request_id", requestID)
+			}
 			continue
 		}
 		responseID, err := parseUDPEchoResponse(buf[:n])

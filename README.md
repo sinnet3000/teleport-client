@@ -95,6 +95,17 @@ teleport-client \
 If a prior session no longer receives a console candidate, create a new invite
 and run the first-connection command again with a new session-file path.
 
+During startup, the client retries compatible observed and console-advertised
+endpoints if the first WireGuard handshake does not complete. If an established
+tunnel later stops answering its in-tunnel health probe for about one minute,
+the client compares the probe failure with WireGuard handshake and receive
+progress. It keeps a demonstrably active tunnel up if only the echo service is
+unavailable; otherwise it automatically cycles the known compatible endpoints
+with bounded backoff. If those endpoints remain unreachable, it closes the old
+tunnel and performs a fresh ICE/CONNECT negotiation with the saved session so
+the console can advertise a new UDP tuple. The SOCKS listener is recreated as
+part of that recovery; existing connections cannot survive a broken tunnel.
+
 ## Use the SOCKS proxy
 
 The proxy defaults to loopback and supports TCP CONNECT. `socks5h` resolves

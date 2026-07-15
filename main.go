@@ -49,50 +49,50 @@ func main() {
 		}
 	}
 
-	priv, pub, err := wgKeypair()
-	if err != nil {
-		panic(err)
-	}
-
 	session := establishSession(flags, fatal)
+	reconnectBackoff := 2 * time.Second
+	for attempt := 1; ; attempt++ {
+		priv, pub, err := wgKeypair()
+		fatal(err)
 
-	// Request ICE configuration, then open one UDP socket per enabled
-	// address family and gather interface plus server-reflexive candidates
-	// from the returned STUN server.
-	ice := fetchICEConfiguration(session.Token, session.Secret, fatal)
+		// A fresh ICE/CONNECT exchange is required after known endpoints are
+		// exhausted because the console's public UDP tuple may have changed.
+		ice := fetchICEConfiguration(session.Token, session.Secret, fatal)
+		port := listenPort()
+		sockets, err := openUDPSockets(port, flags.family)
+		fatal(err)
+		local := gatherLocalCandidates(sockets, port, flags.family, ice)
+		if err := validateLocalCandidates(local, flags.family); err != nil {
+			sockets.Close()
+			fatal(err)
+		}
 
-	port := listenPort()
-	sockets, err := openUDPSockets(port, flags.family)
-	fatal(err)
-	local := gatherLocalCandidates(sockets, port, flags.family, ice)
-	if flags.family != familyDual && len(local) == 0 {
-		fatal(fmt.Errorf("no viable %s candidate on this host", flags.family))
-	}
+		stunSecret := randomB64(32)
+		stunSecretHash := stunIntegrityKey(stunSecret)
+		nomination := newNominationTracker()
+		early := newEarlyNominationListener(sockets, stunSecretHash, nomination)
+		early.Start()
 
-	stunSecret := randomB64(32)
-	stunSecretHash := stunIntegrityKey(stunSecret)
-	nomination := newNominationTracker()
+		connResp := connectAndAwaitResponse(session, flags.name, pub, stunSecret, local, ice, early, fatal)
+		endpoint, endpointMode, candidateQueue := negotiateEndpoint(flags.endpointOverride, sockets, port, connResp, stunSecretHash, nomination, early, local, fatal)
 
-	// The early listener begins answering the console's authenticated
-	// nomination probes as soon as they arrive, which may be before
-	// CONNECT_RESPONSE below.
-	early := newEarlyNominationListener(sockets, stunSecretHash, nomination)
-	early.Start()
+		conf := buildConfig(priv, port, endpoint, connResp.ServerInfo, connResp.DNSAddrs, connResp.ClientIP)
+		appLog.Info("endpoint selected", "endpoint", endpoint, "mode", endpointMode, "connection_attempt", attempt)
+		appLog.Debug("WireGuard peer configured", "public_key", connResp.ServerInfo.WGPubKey)
+		if session.Access != nil {
+			_, _ = apiRequest("DELETE", "/"+session.Access.TeleportRequestID, session.DeviceToken, nil)
+			session.Access = nil
+		}
 
-	connResp := connectAndAwaitResponse(session, flags.name, pub, stunSecret, local, ice, early, fatal)
+		if flags.printConfig {
+			sockets.Close()
+			fmt.Print(conf)
+			return
+		}
 
-	endpoint, endpointMode, candidateQueue := negotiateEndpoint(flags.endpointOverride, sockets, port, connResp, stunSecretHash, nomination, early, local, fatal)
-
-	conf := buildConfig(priv, port, endpoint, connResp.ServerInfo, connResp.DNSAddrs, connResp.ClientIP)
-	appLog.Info("endpoint selected", "endpoint", endpoint, "mode", endpointMode)
-	appLog.Debug("WireGuard peer configured", "public_key", connResp.ServerInfo.WGPubKey)
-	if session.Access != nil {
-		_, _ = apiRequest("DELETE", "/"+session.Access.TeleportRequestID, session.DeviceToken, nil)
-	}
-
-	if !flags.printConfig {
 		early.Stop()
-		runTunnel(tunnelParams{
+		tunnelStarted := time.Now()
+		err = runTunnel(tunnelParams{
 			priv:           priv,
 			port:           port,
 			endpoint:       endpoint,
@@ -105,10 +105,24 @@ func main() {
 			debug:          flags.debug,
 			candidateQueue: candidateQueue,
 		}, fatal)
-	} else {
 		sockets.Close()
-		fmt.Print(conf)
+		if time.Since(tunnelStarted) >= 5*time.Minute {
+			reconnectBackoff = 2 * time.Second
+		}
+		appLog.Warn("Teleport tunnel disconnected; renegotiating", "error", err, "backoff", reconnectBackoff)
+		time.Sleep(reconnectBackoff)
+		reconnectBackoff *= 2
+		if reconnectBackoff > 30*time.Second {
+			reconnectBackoff = 30 * time.Second
+		}
 	}
+}
+
+func validateLocalCandidates(local []candidate, family networkFamily) error {
+	if len(local) == 0 {
+		return fmt.Errorf("no viable %s candidate on this host", family)
+	}
+	return nil
 }
 
 // defaultClientName returns the local hostname for the --name default, so a
@@ -420,5 +434,36 @@ func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, c
 		fatal(errors.New("no endpoint candidate available"))
 	}
 	early.Stop()
+	candidateQueue = buildCandidateRetryQueue(endpoint, candidateQueue, compatibleCandidates(sockets, peerCandidates, local))
 	return endpoint, mode, candidateQueue
+}
+
+// buildCandidateRetryQueue preserves candidates that actually reached us
+// first, then appends every compatible candidate advertised by the peer. A
+// late/fallback selection may otherwise leave the retry queue empty even
+// though the CONNECT_RESPONSE supplied viable alternatives.
+func buildCandidateRetryQueue(endpoint string, observed []string, advertised []candidate) []string {
+	seen := map[string]bool{endpoint: true}
+	queue := make([]string, 0, len(observed)+len(advertised))
+	appendCandidate := func(addr string) {
+		if addr == "" || seen[addr] {
+			return
+		}
+		seen[addr] = true
+		queue = append(queue, addr)
+	}
+	for _, addr := range observed {
+		appendCandidate(addr)
+	}
+	// Once observed candidates are exhausted, public reflexive/relay tuples
+	// are materially more likely to work across networks than peer-private
+	// interface addresses. Keep each group's existing rank stable.
+	for _, public := range []bool{true, false} {
+		for _, candidate := range advertised {
+			if isPubliclyRoutableCandidateAddr(candidate.Addr) == public {
+				appendCandidate(candidate.Addr)
+			}
+		}
+	}
+	return queue
 }

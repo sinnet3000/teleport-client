@@ -152,6 +152,36 @@ func TestStunBindingProbeIsAuthenticatedAndHasNoNominationData(t *testing.T) {
 	}
 }
 
+func TestSendPeerCandidateProbeUsesIPv4Socket(t *testing.T) {
+	const secret = "recovery-probe-secret"
+	receiver, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+	sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+
+	if !sendPeerCandidateProbe(&udpSockets{V4: sender}, receiver.LocalAddr().String(), secret) {
+		t.Fatal("recovery STUN probe was not sent")
+	}
+	if err := receiver.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1500)
+	n, _, err := receiver.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, ok := parseStunMessage(buf[:n])
+	if !ok || msg.Type != stun.BindingRequest || !validStunIntegrity(msg, secret) {
+		t.Fatal("received recovery probe was not an authenticated STUN binding request")
+	}
+}
+
 func TestEarlyNominationStopRestoresSocketDeadline(t *testing.T) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
@@ -306,5 +336,35 @@ func TestCompatibleCandidatesRequiresRealLocalCandidateNotJustOpenSocket(t *test
 	got := compatibleCandidates(&udpSockets{V4: &net.UDPConn{}, V6: &net.UDPConn{}}, candidates, ipv4OnlyLocal)
 	if len(got) != 1 || got[0].Addr != "192.0.2.1:1000" {
 		t.Fatalf("compatibleCandidates with no real local IPv6 = %#v, want only IPv4", got)
+	}
+}
+
+func TestBuildCandidateRetryQueuePreservesObservedThenAdvertised(t *testing.T) {
+	got := buildCandidateRetryQueue(
+		"203.0.113.1:1000",
+		[]string{"203.0.113.2:2000", "203.0.113.1:1000", "203.0.113.2:2000"},
+		[]candidate{
+			{Type: "iface", Addr: "192.168.1.1:1000"},
+			{Type: "reflex", Addr: "203.0.113.3:3000"},
+			{Type: "iface", Addr: "203.0.113.2:2000"},
+		},
+	)
+	want := []string{"203.0.113.2:2000", "203.0.113.3:3000", "192.168.1.1:1000"}
+	if len(got) != len(want) {
+		t.Fatalf("retry queue = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("retry queue = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestValidateLocalCandidatesRejectsEmptyDualStackResult(t *testing.T) {
+	if err := validateLocalCandidates(nil, familyDual); err == nil {
+		t.Fatal("dual-stack mode accepted an empty candidate set")
+	}
+	if err := validateLocalCandidates([]candidate{{Type: "iface", Addr: "192.0.2.1:1000"}}, familyDual); err != nil {
+		t.Fatalf("dual-stack mode rejected a usable candidate: %v", err)
 	}
 }

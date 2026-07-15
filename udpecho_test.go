@@ -47,7 +47,7 @@ func TestWaitForStartupResponseSurvivesInitialTimeout(t *testing.T) {
 	}()
 
 	buf := make([]byte, 2048)
-	if !waitForStartupResponse(client, buf, 0, "0", started) {
+	if !waitForStartupResponse(client, buf, 0, "0", started, nil) {
 		t.Fatal("expected startup response to be matched after re-arming past the first timeout")
 	}
 	if time.Since(started) < startupRetryInterval {
@@ -62,11 +62,33 @@ func TestWaitForStartupResponseFailsFastOnHardError(t *testing.T) {
 
 	buf := make([]byte, 2048)
 	start := time.Now()
-	if waitForStartupResponse(client, buf, 0, "0", start) {
+	if waitForStartupResponse(client, buf, 0, "0", start, nil) {
 		t.Fatal("expected startup wait on a closed connection to fail")
 	}
 	if elapsed := time.Since(start); elapsed >= startupCeiling {
 		t.Fatalf("hard error should fail fast, not spin until the ceiling: %v", elapsed)
+	}
+}
+
+func TestWaitForStartupResponseResendsAfterTimeout(t *testing.T) {
+	withFastEchoTimeouts(t)
+	client, server := udpConnPair(t)
+	peer, err := net.ResolveUDPAddr("udp4", client.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resends := 0
+	resend := func() error {
+		resends++
+		_, err := server.WriteToUDP([]byte(`{"req_id":"0"}`), peer)
+		return err
+	}
+
+	if !waitForStartupResponse(client, make([]byte, 2048), 0, "0", time.Now(), resend) {
+		t.Fatal("expected startup response after retry callback")
+	}
+	if resends != 1 {
+		t.Fatalf("startup resends = %d, want 1", resends)
 	}
 }
 
@@ -116,5 +138,35 @@ func TestUDPEchoStatsSummaryWindow(t *testing.T) {
 	}
 	if stats.count != 3 || stats.total != 300*time.Millisecond || stats.min != 50*time.Millisecond || stats.max != 150*time.Millisecond {
 		t.Fatalf("unexpected statistics: %+v", stats)
+	}
+}
+
+func TestUDPEchoHealthRequiresInitialResponse(t *testing.T) {
+	health := udpEchoHealth{}
+	if event, _ := health.observe(false); event != udpEchoStartupFailed {
+		t.Fatalf("startup failure event = %v, want startup failure", event)
+	}
+}
+
+func TestUDPEchoHealthDetectsSustainedLossAndResetsOnSuccess(t *testing.T) {
+	health := udpEchoHealth{}
+	if event, first := health.observe(true); event != udpEchoHealthy || !first {
+		t.Fatalf("initial success = (%v, first=%v), want healthy first success", event, first)
+	}
+	for i := 0; i < maxConsecutiveEchoFailures-1; i++ {
+		if event, _ := health.observe(false); event != 0 {
+			t.Fatalf("failure %d emitted early event %v", i+1, event)
+		}
+	}
+	if event, first := health.observe(true); event != udpEchoHealthy || first {
+		t.Fatalf("recovery = (%v, first=%v), want non-first healthy event", event, first)
+	}
+	for i := 0; i < maxConsecutiveEchoFailures-1; i++ {
+		if event, _ := health.observe(false); event != 0 {
+			t.Fatalf("failure %d after reset emitted early event %v", i+1, event)
+		}
+	}
+	if event, _ := health.observe(false); event != udpEchoUnhealthy {
+		t.Fatalf("%d consecutive failures emitted %v, want unhealthy", maxConsecutiveEchoFailures, event)
 	}
 }

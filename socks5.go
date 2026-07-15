@@ -24,6 +24,17 @@ type loggedSocksConn struct {
 	target  string
 }
 
+type socks5Proxy struct {
+	listener net.Listener
+}
+
+func (p *socks5Proxy) Close() error {
+	if p == nil || p.listener == nil {
+		return nil
+	}
+	return p.listener.Close()
+}
+
 func (c *loggedSocksConn) Close() error {
 	appLog.Debug("SOCKS tunnel connection closed", "network", c.network, "target", c.target)
 	return c.Conn.Close()
@@ -49,16 +60,16 @@ func (r tunnelSocksResolver) Resolve(ctx context.Context, name string) (context.
 	return ctx, nil, fmt.Errorf("no IPv4 address found for %q", name)
 }
 
-func startSocks5Proxy(addr string, tunnelNet *netstack.Net) error {
+func startSocks5Proxy(addr string, tunnelNet *netstack.Net) (*socks5Proxy, error) {
 	if tunnelNet == nil {
-		return errors.New("SOCKS5 proxy requires a Teleport netstack")
+		return nil, errors.New("SOCKS5 proxy requires a Teleport netstack")
 	}
 	if err := validateSocks5Addr(addr); err != nil {
-		return err
+		return nil, err
 	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("listen SOCKS5 %s: %w", addr, err)
+		return nil, fmt.Errorf("listen SOCKS5 %s: %w", addr, err)
 	}
 	server := socks5.NewServer(
 		socks5.WithDial(func(ctx context.Context, network, target string) (net.Conn, error) {
@@ -87,7 +98,7 @@ func startSocks5Proxy(addr string, tunnelNet *netstack.Net) error {
 		}
 	}()
 	appLog.Info("SOCKS5 proxy listening", "address", listener.Addr().String(), "transport", "Teleport")
-	return nil
+	return &socks5Proxy{listener: listener}, nil
 }
 
 func validateSocks5Addr(addr string) error {
