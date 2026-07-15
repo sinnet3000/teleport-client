@@ -326,6 +326,68 @@ func sendPeerCandidateProbe(s *udpSockets, addr, secHash string) bool {
 	return true
 }
 
+// setUDPReadDeadline applies t to both sockets, ignoring nils.
+func setUDPReadDeadline(s *udpSockets, t time.Time) {
+	if s.V4 != nil {
+		_ = s.V4.SetReadDeadline(t)
+	}
+	if s.V6 != nil {
+		_ = s.V6.SetReadDeadline(t)
+	}
+}
+
+// readUDPPacket reads one datagram from conn, returning ok=false if done has
+// fired or the read errored (e.g. from a deadline set by udpReadStopper.Stop).
+func readUDPPacket(conn *net.UDPConn, done <-chan struct{}, buf []byte) (n int, addr *net.UDPAddr, ok bool) {
+	select {
+	case <-done:
+		return 0, nil, false
+	default:
+	}
+	n, addr, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		return 0, nil, false
+	}
+	return n, addr, true
+}
+
+// udpReadStopper coordinates goroutines reading from up to two UDP sockets:
+// Stop unblocks any goroutine parked in ReadFromUDP and waits for all of them
+// to exit before returning, so they don't keep stealing packets from
+// whichever reader (WireGuard's netstack, or the fallback probe) uses these
+// sockets next. Safe to call more than once.
+type udpReadStopper struct {
+	sockets  *udpSockets
+	done     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
+}
+
+func newUDPReadStopper(sockets *udpSockets) *udpReadStopper {
+	return &udpReadStopper{sockets: sockets, done: make(chan struct{})}
+}
+
+// start launches fn as a tracked goroutine reading conn; a nil conn is a no-op.
+func (u *udpReadStopper) start(conn *net.UDPConn, fn func(conn *net.UDPConn, done <-chan struct{})) {
+	if conn == nil {
+		return
+	}
+	u.wg.Add(1)
+	go func() {
+		defer u.wg.Done()
+		fn(conn, u.done)
+	}()
+}
+
+func (u *udpReadStopper) Stop() {
+	u.stopOnce.Do(func() {
+		close(u.done)
+		setUDPReadDeadline(u.sockets, time.Now())
+		u.wg.Wait()
+		setUDPReadDeadline(u.sockets, time.Time{})
+	})
+}
+
 // nominationHint is an early, unverified signal that a candidate address may
 // be the one the console eventually nominates; the caller confirms the real
 // endpoint from earlyNominationListener.Logs() once CONNECT_RESPONSE arrives.
@@ -348,9 +410,7 @@ type earlyNominationListener struct {
 	mu   sync.Mutex
 	logs []packetLog
 
-	done     chan struct{}
-	stopOnce sync.Once
-	wg       sync.WaitGroup
+	stop *udpReadStopper
 }
 
 func newEarlyNominationListener(sockets *udpSockets, stunSecretHash string, nomination *nominationTracker) *earlyNominationListener {
@@ -359,7 +419,7 @@ func newEarlyNominationListener(sockets *udpSockets, stunSecretHash string, nomi
 		stunSecretHash: stunSecretHash,
 		nomination:     nomination,
 		hints:          make(chan nominationHint, 1),
-		done:           make(chan struct{}),
+		stop:           newUDPReadStopper(sockets),
 	}
 }
 
@@ -367,27 +427,15 @@ func newEarlyNominationListener(sockets *udpSockets, stunSecretHash string, nomi
 // single-shot: create a new one per connection attempt rather than
 // restarting one that has been Stopped.
 func (l *earlyNominationListener) Start() {
-	for _, conn := range []*net.UDPConn{l.sockets.V4, l.sockets.V6} {
-		if conn == nil {
-			continue
-		}
-		conn := conn
-		l.wg.Add(1)
-		go l.readLoop(conn)
-	}
+	l.stop.start(l.sockets.V4, l.readLoop)
+	l.stop.start(l.sockets.V6, l.readLoop)
 }
 
-func (l *earlyNominationListener) readLoop(conn *net.UDPConn) {
-	defer l.wg.Done()
+func (l *earlyNominationListener) readLoop(conn *net.UDPConn, done <-chan struct{}) {
 	buf := make([]byte, 1500)
 	for {
-		select {
-		case <-l.done:
-			return
-		default:
-		}
-		n, addr, err := conn.ReadFromUDP(buf)
-		if err != nil {
+		n, addr, ok := readUDPPacket(conn, done, buf)
+		if !ok {
 			return
 		}
 		data := append([]byte(nil), buf[:n]...)
@@ -421,22 +469,7 @@ func (l *earlyNominationListener) appendLog(p packetLog) {
 // (WireGuard's netstack, or the fallback probe) uses these sockets next. Safe
 // to call more than once.
 func (l *earlyNominationListener) Stop() {
-	l.stopOnce.Do(func() {
-		close(l.done)
-		if l.sockets.V4 != nil {
-			_ = l.sockets.V4.SetReadDeadline(time.Now())
-		}
-		if l.sockets.V6 != nil {
-			_ = l.sockets.V6.SetReadDeadline(time.Now())
-		}
-		l.wg.Wait()
-		if l.sockets.V4 != nil {
-			_ = l.sockets.V4.SetReadDeadline(time.Time{})
-		}
-		if l.sockets.V6 != nil {
-			_ = l.sockets.V6.SetReadDeadline(time.Time{})
-		}
-	})
+	l.stop.Stop()
 }
 
 // Logs returns a snapshot of packets observed so far.
@@ -486,62 +519,29 @@ func waitForNomination(ctx context.Context, s *udpSockets, port int, cands []can
 		data []byte
 	}
 	packets := make(chan packet, 16)
-	var readWG sync.WaitGroup
-	readDone := make(chan struct{})
-	readLoop := func(conn *net.UDPConn) {
-		defer readWG.Done()
-		if conn == nil {
-			return
-		}
+	reader := newUDPReadStopper(s)
+	// No self-timeout in the read loop below: reader.Stop explicitly unblocks
+	// and cancels it on every return path, so re-arming a rolling deadline
+	// here would race with that cancellation and could overwrite it with a
+	// future deadline, hanging shutdown.
+	readLoop := func(conn *net.UDPConn, done <-chan struct{}) {
 		buf := make([]byte, 1500)
 		for {
-			select {
-			case <-readDone:
-				return
-			default:
-			}
-			// No self-timeout here: stopReadLoops explicitly unblocks and
-			// cancels this loop on every return path, so re-arming a rolling
-			// deadline here would race with that cancellation and could
-			// overwrite it with a future deadline, hanging shutdown.
-			n, addr, err := conn.ReadFromUDP(buf)
-			if err != nil {
+			n, addr, ok := readUDPPacket(conn, done, buf)
+			if !ok {
 				return
 			}
 			data := append([]byte(nil), buf[:n]...)
 			select {
 			case packets <- packet{conn: conn, addr: addr, data: data}:
-			case <-readDone:
+			case <-done:
 				return
 			}
 		}
 	}
-	readWG.Add(2)
-	go readLoop(s.V4)
-	go readLoop(s.V6)
-	// Unblock the readLoop goroutines and wait for them to exit before
-	// returning, so they don't keep stealing packets from whichever reader
-	// (WireGuard's netstack, or the fallback probe) uses these sockets next.
-	var stopReadOnce sync.Once
-	stopReadLoops := func() {
-		stopReadOnce.Do(func() {
-			close(readDone)
-			if s.V4 != nil {
-				_ = s.V4.SetReadDeadline(time.Now())
-			}
-			if s.V6 != nil {
-				_ = s.V6.SetReadDeadline(time.Now())
-			}
-			readWG.Wait()
-			if s.V4 != nil {
-				_ = s.V4.SetReadDeadline(time.Time{})
-			}
-			if s.V6 != nil {
-				_ = s.V6.SetReadDeadline(time.Time{})
-			}
-		})
-	}
-	defer stopReadLoops()
+	reader.start(s.V4, readLoop)
+	reader.start(s.V6, readLoop)
+	defer reader.Stop()
 
 	done := time.After(12 * time.Second)
 	tick := time.NewTicker(400 * time.Millisecond)
@@ -601,7 +601,7 @@ func waitForNomination(ctx context.Context, s *udpSockets, port int, cands []can
 				appLog.Debug("probed nomination candidate", "candidate", c.Addr, "type", c.Type)
 			}
 		case <-done:
-			stopReadLoops()
+			reader.Stop()
 			return endpointSelection{Endpoint: probeCandidates(s, cands, sessionSecretHash, local), Mode: "fallback_probe", Packets: logs}
 		}
 	}
