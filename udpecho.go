@@ -14,6 +14,15 @@ import (
 
 const udpEchoSummaryInterval = 30 * time.Second
 
+// steadyStateEchoDeadline applies to request 1+.
+const steadyStateEchoDeadline = 3 * time.Second
+
+// startupRetryInterval is the re-armed wait step for request 0.
+const startupRetryInterval = 3 * time.Second
+
+// startupCeiling spans roughly two WireGuard handshake retries.
+const startupCeiling = 25 * time.Second
+
 type udpEchoStats struct {
 	windowStart time.Time
 	count       int
@@ -90,38 +99,85 @@ func runUDPEchoPinger(tunnelNet *netstack.Net, secret string, info serverInfo) {
 			return
 		}
 		appLog.Debug("sent UDP echo request", "request_id", requestID, "endpoint", remote.String())
-		deadline := time.Now().Add(3 * time.Second)
-		matched := false
-		for !matched {
-			_ = conn.SetReadDeadline(deadline)
-			n, err := conn.Read(buf)
-			if err != nil {
-				appLog.Warn("UDP echo request timed out", "request_id", requestID, "error", err)
-				break
+
+		var matched bool
+		if requestID == 0 {
+			matched = waitForStartupResponse(conn, buf, requestID, request.RequestID, started)
+		} else {
+			matched = waitForSteadyStateResponse(conn, buf, requestID, request.RequestID)
+		}
+
+		if matched {
+			now := time.Now()
+			rtt := now.Sub(started)
+			appLog.Debug("received UDP echo response", "request_id", requestID, "rtt", rtt.Round(time.Millisecond))
+			if !tunnelReadyLogged {
+				appLog.Info("WireGuard tunnel ready", "initial_echo_rtt", rtt.Round(time.Millisecond))
+				tunnelReadyLogged = true
 			}
-			responseID, err := parseUDPEchoResponse(buf[:n])
-			if err != nil {
-				appLog.Debug("invalid UDP echo response", "request_id", requestID, "parsed_id", responseID, "response_bytes", n, "error", err)
-				continue
-			}
-			if responseID != request.RequestID {
-				// Discard late replies without shifting subsequent request IDs.
-				appLog.Warn("discarded stale UDP echo response", "request_id", requestID, "response_id", responseID)
-			} else {
-				now := time.Now()
-				rtt := now.Sub(started)
-				appLog.Debug("received UDP echo response", "request_id", requestID, "rtt", rtt.Round(time.Millisecond))
-				if !tunnelReadyLogged {
-					appLog.Info("WireGuard tunnel ready", "initial_echo_rtt", rtt.Round(time.Millisecond))
-					tunnelReadyLogged = true
-				}
-				if stats.observe(now, rtt) {
-					stats.logAndReset(now)
-				}
-				matched = true
+			if stats.observe(now, rtt) {
+				stats.logAndReset(now)
 			}
 		}
 		time.Sleep(2 * time.Second)
+	}
+}
+
+// waitForSteadyStateResponse waits a single steadyStateEchoDeadline for a
+// reply matching wantID, discarding anything else.
+func waitForSteadyStateResponse(conn net.Conn, buf []byte, requestID int, wantID string) bool {
+	deadline := time.Now().Add(steadyStateEchoDeadline)
+	for {
+		_ = conn.SetReadDeadline(deadline)
+		n, err := conn.Read(buf)
+		if err != nil {
+			appLog.Warn("UDP echo request timed out", "request_id", requestID, "error", err)
+			return false
+		}
+		responseID, err := parseUDPEchoResponse(buf[:n])
+		if err != nil {
+			appLog.Debug("invalid UDP echo response", "request_id", requestID, "parsed_id", responseID, "response_bytes", n, "error", err)
+			continue
+		}
+		if responseID != wantID {
+			appLog.Warn("discarded stale UDP echo response", "request_id", requestID, "response_id", responseID)
+			continue
+		}
+		return true
+	}
+}
+
+// waitForStartupResponse re-arms the read deadline instead of giving up
+// after one timeout, so a reply delayed by a WireGuard handshake retry
+// still matches request 0 rather than being discarded as stale.
+func waitForStartupResponse(conn net.Conn, buf []byte, requestID int, wantID string, started time.Time) bool {
+	ceiling := started.Add(startupCeiling)
+	for {
+		now := time.Now()
+		if !now.Before(ceiling) {
+			appLog.Error("UDP echo startup probe failed", "request_id", requestID, "elapsed", now.Sub(started).Round(time.Second))
+			return false
+		}
+		deadline := now.Add(startupRetryInterval)
+		if deadline.After(ceiling) {
+			deadline = ceiling
+		}
+		_ = conn.SetReadDeadline(deadline)
+		n, err := conn.Read(buf)
+		if err != nil {
+			appLog.Debug("UDP echo startup probe still waiting", "request_id", requestID, "elapsed", time.Since(started).Round(time.Second))
+			continue
+		}
+		responseID, err := parseUDPEchoResponse(buf[:n])
+		if err != nil {
+			appLog.Debug("invalid UDP echo response", "request_id", requestID, "parsed_id", responseID, "response_bytes", n, "error", err)
+			continue
+		}
+		if responseID != wantID {
+			appLog.Debug("discarded unexpected UDP echo response during startup", "request_id", requestID, "response_id", responseID)
+			continue
+		}
+		return true
 	}
 }
 

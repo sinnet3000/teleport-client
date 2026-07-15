@@ -1,9 +1,57 @@
 package main
 
 import (
+	"net"
 	"testing"
 	"time"
 )
+
+// udpConnPair returns two loopback UDP conns connected to each other.
+func udpConnPair(t *testing.T) (client *net.UDPConn, server *net.UDPConn) {
+	t.Helper()
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { server.Close() })
+	client, err = net.DialUDP("udp4", nil, server.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { client.Close() })
+	return client, server
+}
+
+func TestWaitForStartupResponseSurvivesInitialTimeout(t *testing.T) {
+	client, server := udpConnPair(t)
+	started := time.Now()
+
+	go func() {
+		time.Sleep(startupRetryInterval + 500*time.Millisecond)
+		peer, _ := net.ResolveUDPAddr("udp4", client.LocalAddr().String())
+		_, _ = server.WriteToUDP([]byte(`{"req_id":"0"}`), peer)
+	}()
+
+	buf := make([]byte, 2048)
+	if !waitForStartupResponse(client, buf, 0, "0", started) {
+		t.Fatal("expected startup response to be matched after re-arming past the first timeout")
+	}
+	if time.Since(started) < startupRetryInterval {
+		t.Fatal("response matched before the first deadline window elapsed; re-arming did not happen")
+	}
+}
+
+func TestWaitForSteadyStateResponseTimesOutOnce(t *testing.T) {
+	client, _ := udpConnPair(t)
+	start := time.Now()
+	buf := make([]byte, 2048)
+	if waitForSteadyStateResponse(client, buf, 1, "1") {
+		t.Fatal("expected no response to time out")
+	}
+	if elapsed := time.Since(start); elapsed >= steadyStateEchoDeadline+startupRetryInterval {
+		t.Fatalf("steady-state wait re-armed past a single deadline: %v", elapsed)
+	}
+}
 
 func TestParseUDPEchoResponse(t *testing.T) {
 	for _, tt := range []struct {
