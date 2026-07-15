@@ -143,7 +143,7 @@ func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionR
 	appLog.Info("endpoint selected", "endpoint", endpoint, "mode", endpointMode, "connection_attempt", attempt)
 	appLog.Debug("WireGuard peer configured", "public_key", connResp.ServerInfo.WGPubKey)
 	if session.Access != nil {
-		_, _ = apiRequestContext(ctx, "DELETE", "/"+session.Access.TeleportRequestID, session.DeviceToken, nil)
+		_, _ = apiRequestContext(ctx, apiBase, "DELETE", "/"+session.Access.TeleportRequestID, session.DeviceToken, nil)
 		session.Access = nil
 	}
 
@@ -313,12 +313,12 @@ func establishSession(ctx context.Context, flags cliFlags) (sessionResult, error
 	clientID := randomUUID()
 
 	accessBody := apiEnvelope{Token: token, Payload: map[string]interface{}{"request_type": "REQUEST_ACCESS", "secret": flags.invite, "client_id": clientID, "client_name": flags.name}}
-	access, err := apiRequestContext(ctx, "POST", "/", "", accessBody)
+	access, err := apiRequestContext(ctx, apiBase, "POST", "/", "", accessBody)
 	if err != nil {
 		return sessionResult{}, err
 	}
 
-	poll, err := pollForResponseContext(ctx, token, access.TeleportRequestID, "ACCESS_GRANTED", 2*time.Second, 60, nil)
+	poll, err := pollForResponseWithContext(ctx, apiRequestFunc(ctx), token, access.TeleportRequestID, "ACCESS_GRANTED", 2*time.Second, 60, nil)
 	if err != nil {
 		return sessionResult{}, err
 	}
@@ -359,12 +359,12 @@ func establishSession(ctx context.Context, flags cliFlags) (sessionResult, error
 
 func fetchICEConfiguration(ctx context.Context, sessionToken, sessionSecret string) ([]iceServer, error) {
 	iceBody := apiEnvelope{Token: sessionToken, Payload: map[string]interface{}{"request_type": "GET_ICE_CONFIGURATION", "secret": sessionSecret}}
-	iceReq, err := apiRequestContext(ctx, "POST", "/", "", iceBody)
+	iceReq, err := apiRequestContext(ctx, apiBase, "POST", "/", "", iceBody)
 	if err != nil {
 		return nil, err
 	}
 
-	poll, err := pollForResponseContext(ctx, sessionToken, iceReq.TeleportRequestID, "ICE_CONFIGURATION", responsePollInterval, 100, nil)
+	poll, err := pollForResponseWithContext(ctx, apiRequestFunc(ctx), sessionToken, iceReq.TeleportRequestID, "ICE_CONFIGURATION", responsePollInterval, 100, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +375,7 @@ func fetchICEConfiguration(ctx context.Context, sessionToken, sessionSecret stri
 	if len(ice) == 0 {
 		return nil, errors.New("timed out waiting for ICE_CONFIGURATION")
 	}
-	_, _ = apiRequestContext(ctx, "DELETE", "/"+iceReq.TeleportRequestID, sessionToken, nil)
+	_, _ = apiRequestContext(ctx, apiBase, "DELETE", "/"+iceReq.TeleportRequestID, sessionToken, nil)
 	return ice, nil
 }
 
@@ -423,12 +423,12 @@ func connectAndAwaitResponse(ctx context.Context, session sessionResult, name, p
 			"peer_desc":           peerDesc{Candidates: local, IceConfig: ice, IsMaster: false},
 		},
 	}
-	connectReq, err := apiRequestContext(ctx, "POST", "/", "", apiEnvelope{Token: session.Token, Payload: connectPayload})
+	connectReq, err := apiRequestContext(ctx, apiBase, "POST", "/", "", apiEnvelope{Token: session.Token, Payload: connectPayload})
 	if err != nil {
 		return nil, err
 	}
 
-	connResp, err := pollForResponseContext(ctx, session.Token, connectReq.TeleportRequestID, "CONNECT_RESPONSE", responsePollInterval, 200, func() {
+	connResp, err := pollForResponseWithContext(ctx, apiRequestFunc(ctx), session.Token, connectReq.TeleportRequestID, "CONNECT_RESPONSE", responsePollInterval, 200, func() {
 		select {
 		case nom := <-early.hints:
 			// The real endpoint/mode is recovered from early.Logs() below once
@@ -444,7 +444,7 @@ func connectAndAwaitResponse(ctx context.Context, session sessionResult, name, p
 	if connResp == nil {
 		return nil, errors.New("timed out waiting for CONNECT_RESPONSE")
 	}
-	_, _ = apiRequestContext(ctx, "DELETE", "/"+connectReq.TeleportRequestID, session.Token, nil)
+	_, _ = apiRequestContext(ctx, apiBase, "DELETE", "/"+connectReq.TeleportRequestID, session.Token, nil)
 	return connResp, nil
 }
 
