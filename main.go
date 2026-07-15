@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-var version = "v0.1.0"
+var version = "v0.1.1"
 
 // responsePollInterval is the poll interval Teleport's console-facing
 // request/poll/delete cycle uses once past the initial ACCESS_GRANTED wait.

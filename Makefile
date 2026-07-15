@@ -2,7 +2,7 @@
 BINARY=teleport-client
 
 # Version information
-VERSION=v0.1.0
+VERSION=v0.1.1
 
 # Build flags
 LDFLAGS=-ldflags "-X main.version=${VERSION}"
