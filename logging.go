@@ -24,9 +24,6 @@ func newAppLogger(w io.Writer, debug bool) *appLogger {
 	handler := slog.NewTextHandler(w, &slog.HandlerOptions{
 		Level: level,
 		ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
-			if attr.Key == slog.TimeKey {
-				return slog.Attr{}
-			}
 			if sensitiveLogKey(attr.Key) {
 				return slog.String(attr.Key, redactedLogValue)
 			}

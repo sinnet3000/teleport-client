@@ -28,6 +28,34 @@ func TestInterfaceAddrIP(t *testing.T) {
 	}
 }
 
+func TestIsRoutableCandidateIP(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		ip     string
+		family networkFamily
+		want   bool
+	}{
+		{"global IPv4 dual", "203.0.113.5", familyDual, true},
+		{"global IPv4 wrong family", "203.0.113.5", familyIPv6, false},
+		{"global IPv6 dual", "2001:db8::1", familyDual, true},
+		{"global IPv6 wrong family", "2001:db8::1", familyIPv4, false},
+		{"IPv6 ULA rejected", "fd07:b51a:cc66::1", familyIPv6, false},
+		{"IPv6 ULA rejected even dual", "fd00::1", familyDual, false},
+		{"IPv6 link-local rejected", "fe80::1", familyIPv6, false},
+		{"IPv4 private LAN allowed", "192.168.1.220", familyIPv4, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ip := net.ParseIP(tt.ip)
+			if ip == nil {
+				t.Fatalf("invalid test IP %q", tt.ip)
+			}
+			if got := isRoutableCandidateIP(ip, tt.family); got != tt.want {
+				t.Fatalf("isRoutableCandidateIP(%s, %v) = %v, want %v", tt.ip, tt.family, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNominationTrackerAcceptsOnlyMasterWaitSequence(t *testing.T) {
 	tracker := newNominationTracker()
 	const first = "[2001:db8::1]:5000"

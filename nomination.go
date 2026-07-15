@@ -69,13 +69,7 @@ func localCandidates(port int, family networkFamily) []candidate {
 		addrs, _ := iface.Addrs()
 		for _, a := range addrs {
 			ip := interfaceAddrIP(a)
-			if ip == nil || !ip.IsGlobalUnicast() {
-				continue
-			}
-			if family == familyIPv4 && ip.To4() == nil {
-				continue
-			}
-			if family == familyIPv6 && ip.To4() != nil {
+			if ip == nil || !isRoutableCandidateIP(ip, family) {
 				continue
 			}
 			addr := net.JoinHostPort(ip.String(), fmt.Sprint(port))
@@ -86,6 +80,26 @@ func localCandidates(port int, family networkFamily) []candidate {
 		}
 	}
 	return out
+}
+
+// isRoutableCandidateIP reports whether ip is usable as a WAN candidate for
+// family: globally routable, not an IPv6 ULA (fc00::/7), and matching the
+// requested address family.
+func isRoutableCandidateIP(ip net.IP, family networkFamily) bool {
+	if !ip.IsGlobalUnicast() {
+		return false
+	}
+	isV4 := ip.To4() != nil
+	if !isV4 && ip.IsPrivate() {
+		return false
+	}
+	if family == familyIPv4 && !isV4 {
+		return false
+	}
+	if family == familyIPv6 && isV4 {
+		return false
+	}
+	return true
 }
 
 func interfaceAddrIP(addr net.Addr) net.IP {
@@ -218,10 +232,9 @@ func stunBindingProbe(secHash string) ([]byte, [12]byte) {
 }
 
 // startPeerCandidateProbes creates tuple-specific NAT state before the
-// console's master-driven nomination reaches us. The desktop client sends the
-// same compact, MESSAGE-INTEGRITY-only Binding Request to each candidate
-// immediately after CONNECT_RESPONSE. Repeat briefly in case an early packet
-// is lost, then let the existing listener handle the console's DATA countdown.
+// console's master-driven nomination reaches us, then keeps pinging at a
+// slower cadence until stop() is called so a slow nomination doesn't let the
+// NAT/relay mapping go stale before an endpoint is finally selected.
 func startPeerCandidateProbes(s *udpSockets, candidates []candidate, secHash string) func() {
 	done := make(chan struct{})
 	var stopOnce sync.Once
@@ -259,17 +272,30 @@ func startPeerCandidateProbes(s *udpSockets, candidates []candidate, secHash str
 
 	send()
 	go func() {
-		ticker := time.NewTicker(400 * time.Millisecond)
-		defer ticker.Stop()
-		deadline := time.NewTimer(5 * time.Second)
-		defer deadline.Stop()
+		burstTicker := time.NewTicker(400 * time.Millisecond)
+		burstDeadline := time.NewTimer(5 * time.Second)
+	burst:
+		for {
+			select {
+			case <-done:
+				burstTicker.Stop()
+				burstDeadline.Stop()
+				return
+			case <-burstDeadline.C:
+				break burst
+			case <-burstTicker.C:
+				send()
+			}
+		}
+		burstTicker.Stop()
+		burstDeadline.Stop()
+		keepAlive := time.NewTicker(5 * time.Second)
+		defer keepAlive.Stop()
 		for {
 			select {
 			case <-done:
 				return
-			case <-deadline.C:
-				return
-			case <-ticker.C:
+			case <-keepAlive.C:
 				send()
 			}
 		}

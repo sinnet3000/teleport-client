@@ -65,6 +65,9 @@ func main() {
 	sockets, err := openUDPSockets(port, flags.family)
 	fatal(err)
 	local := gatherLocalCandidates(sockets, port, flags.family, ice)
+	if flags.family != familyDual && len(local) == 0 {
+		fatal(fmt.Errorf("no viable %s candidate on this host", flags.family))
+	}
 
 	stunSecret := randomB64(32)
 	stunSecretHash := stunIntegrityKey(stunSecret)
@@ -381,9 +384,12 @@ func negotiateEndpoint(endpointOverride string, sockets *udpSockets, port int, c
 		// Activation allows a verified per-tuple sequence received before the
 		// response to select an endpoint. The Android bridge waits up to 40s.
 		nomination.activate()
+		appLog.Debug("waiting for per-tuple nomination", "timeout", "40s")
 		endpoint = nomination.waitForSelection(40 * time.Second)
 		if endpoint != "" {
 			mode = "per_tuple_nomination"
+		} else {
+			appLog.Debug("per-tuple nomination wait timed out")
 		}
 
 		nominationPackets := early.Logs()
