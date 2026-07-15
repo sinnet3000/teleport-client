@@ -170,6 +170,27 @@ func fetchMetadata(token string) (*metadataResponse, error) {
 	return &out, nil
 }
 
+// StatusCode is 0 for a network-level failure with no response.
+type apiError struct {
+	StatusCode int
+	err        error
+}
+
+func (e *apiError) Error() string { return e.err.Error() }
+func (e *apiError) Unwrap() error { return e.err }
+
+func (e *apiError) transient() bool {
+	return e.StatusCode == 0 || e.StatusCode >= 500 || e.StatusCode == http.StatusTooManyRequests
+}
+
+func isTransientAPIError(err error) bool {
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		return apiErr.transient()
+	}
+	return false
+}
+
 func apiRequest(method, path, token string, body interface{}) (*apiResponse, error) {
 	return apiRequestAt(apiBase, method, path, token, body)
 }
@@ -204,7 +225,7 @@ func apiRequestAt(baseURL, method, path, token string, body interface{}) (*apiRe
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("api %s %s request failed: %s", method, path, redactAPIError(err, token))
+		return nil, &apiError{err: fmt.Errorf("api %s %s request failed: %s", method, path, redactAPIError(err, token))}
 	}
 	defer resp.Body.Close()
 	appLog.Debug("API response", "method", method, "path", path, "status", resp.StatusCode, "duration", time.Since(started).Round(time.Millisecond))
@@ -212,7 +233,7 @@ func apiRequestAt(baseURL, method, path, token string, body interface{}) (*apiRe
 	if resp.StatusCode >= 400 {
 		knownSecrets := append([]string{token}, collectSensitiveStrings(body)...)
 		debugAPIErrorResponse(appLog, method, path, data, knownSecrets...)
-		return nil, fmt.Errorf("api %s %s: %s (response body omitted)", method, path, resp.Status)
+		return nil, &apiError{StatusCode: resp.StatusCode, err: fmt.Errorf("api %s %s: %s (response body omitted)", method, path, resp.Status)}
 	}
 	if resp.StatusCode == http.StatusAccepted || len(data) == 0 {
 		return &apiResponse{StatusCode: resp.StatusCode}, nil
@@ -228,21 +249,39 @@ func apiRequestAt(baseURL, method, path, token string, body interface{}) (*apiRe
 	return &out, nil
 }
 
+// maxConsecutivePollErrors caps retries of transient failures before giving up.
+const maxConsecutivePollErrors = 5
+
 // pollForResponse polls GET /<requestID> every interval, up to maxTries
 // times, until a poll's response_type equals want. It returns nil, nil if
 // want never arrived within maxTries. onTick, if non-nil, runs once per
 // iteration before the poll request, for callers that need to check other
 // channels while waiting.
 func pollForResponse(token, requestID, want string, interval time.Duration, maxTries int, onTick func()) (*apiResponse, error) {
+	return pollForResponseWith(apiRequest, token, requestID, want, interval, maxTries, onTick)
+}
+
+// pollForResponseWith takes the request function as a parameter for tests.
+func pollForResponseWith(request func(method, path, token string, body interface{}) (*apiResponse, error), token, requestID, want string, interval time.Duration, maxTries int, onTick func()) (*apiResponse, error) {
+	consecutiveErrors := 0
 	for i := 0; i < maxTries; i++ {
 		time.Sleep(interval)
 		if onTick != nil {
 			onTick()
 		}
-		poll, err := apiRequest("GET", "/"+requestID, token, nil)
+		poll, err := request("GET", "/"+requestID, token, nil)
 		if err != nil {
-			return nil, err
+			if !isTransientAPIError(err) {
+				return nil, err
+			}
+			consecutiveErrors++
+			if consecutiveErrors >= maxConsecutivePollErrors {
+				return nil, err
+			}
+			appLog.Warn("transient poll failure, retrying", "request_id", requestID, "consecutive_errors", consecutiveErrors, "error", err)
+			continue
 		}
+		consecutiveErrors = 0
 		if poll.ResponseType == want {
 			return poll, nil
 		}

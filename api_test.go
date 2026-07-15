@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAPIRequestRejectsEmptyErrorResponse(t *testing.T) {
@@ -117,6 +118,80 @@ func TestRedactAPIError(t *testing.T) {
 	}
 	if !strings.Contains(got, redactedLogValue) {
 		t.Fatalf("redactAPIError did not mark redaction: %q", got)
+	}
+}
+
+func TestAPIErrorTransientClassification(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		status    int
+		transient bool
+	}{
+		{"network error", 0, true},
+		{"server error", http.StatusInternalServerError, true},
+		{"rate limited", http.StatusTooManyRequests, true},
+		{"unauthorized", http.StatusUnauthorized, false},
+		{"bad request", http.StatusBadRequest, false},
+		{"not found", http.StatusNotFound, false},
+	} {
+		e := &apiError{StatusCode: tt.status, err: fmt.Errorf("boom")}
+		if got := e.transient(); got != tt.transient {
+			t.Fatalf("%s: transient() = %v, want %v", tt.name, got, tt.transient)
+		}
+	}
+}
+
+func TestPollForResponseRetriesTransientThenSucceeds(t *testing.T) {
+	var calls int
+	request := func(method, path, token string, body interface{}) (*apiResponse, error) {
+		calls++
+		if calls < 3 {
+			return nil, &apiError{StatusCode: http.StatusServiceUnavailable, err: fmt.Errorf("unavailable")}
+		}
+		return &apiResponse{ResponseType: "READY"}, nil
+	}
+
+	poll, err := pollForResponseWith(request, "token", "req", "READY", time.Millisecond, 10, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if poll == nil || poll.ResponseType != "READY" {
+		t.Fatalf("expected READY response, got %+v", poll)
+	}
+	if calls != 3 {
+		t.Fatalf("expected 3 calls (2 transient failures + success), got %d", calls)
+	}
+}
+
+func TestPollForResponseFailsFastOnPermanentError(t *testing.T) {
+	var calls int
+	request := func(method, path, token string, body interface{}) (*apiResponse, error) {
+		calls++
+		return nil, &apiError{StatusCode: http.StatusUnauthorized, err: fmt.Errorf("unauthorized")}
+	}
+
+	_, err := pollForResponseWith(request, "token", "req", "READY", time.Millisecond, 10, nil)
+	if err == nil {
+		t.Fatal("expected permanent error to be returned")
+	}
+	if calls != 1 {
+		t.Fatalf("expected exactly 1 call for a permanent error, got %d", calls)
+	}
+}
+
+func TestPollForResponseGivesUpAfterConsecutiveTransientErrors(t *testing.T) {
+	var calls int
+	request := func(method, path, token string, body interface{}) (*apiResponse, error) {
+		calls++
+		return nil, &apiError{StatusCode: http.StatusServiceUnavailable, err: fmt.Errorf("unavailable")}
+	}
+
+	_, err := pollForResponseWith(request, "token", "req", "READY", time.Millisecond, 100, nil)
+	if err == nil {
+		t.Fatal("expected error after exceeding consecutive transient failures")
+	}
+	if calls != maxConsecutivePollErrors {
+		t.Fatalf("expected %d calls before giving up, got %d", maxConsecutivePollErrors, calls)
 	}
 }
 
