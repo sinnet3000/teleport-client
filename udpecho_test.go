@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func TestWaitForStartupResponseSurvivesInitialTimeout(t *testing.T) {
 	}()
 
 	buf := make([]byte, 2048)
-	if !waitForStartupResponse(client, buf, 0, "0", started, nil) {
+	if !waitForStartupResponse(context.Background(), client, buf, 0, "0", started, nil) {
 		t.Fatal("expected startup response to be matched after re-arming past the first timeout")
 	}
 	if time.Since(started) < startupRetryInterval {
@@ -62,7 +63,7 @@ func TestWaitForStartupResponseFailsFastOnHardError(t *testing.T) {
 
 	buf := make([]byte, 2048)
 	start := time.Now()
-	if waitForStartupResponse(client, buf, 0, "0", start, nil) {
+	if waitForStartupResponse(context.Background(), client, buf, 0, "0", start, nil) {
 		t.Fatal("expected startup wait on a closed connection to fail")
 	}
 	if elapsed := time.Since(start); elapsed >= startupCeiling {
@@ -84,7 +85,7 @@ func TestWaitForStartupResponseResendsAfterTimeout(t *testing.T) {
 		return err
 	}
 
-	if !waitForStartupResponse(client, make([]byte, 2048), 0, "0", time.Now(), resend) {
+	if !waitForStartupResponse(context.Background(), client, make([]byte, 2048), 0, "0", time.Now(), resend) {
 		t.Fatal("expected startup response after retry callback")
 	}
 	if resends != 1 {
@@ -97,7 +98,7 @@ func TestWaitForSteadyStateResponseTimesOutOnce(t *testing.T) {
 	client, _ := udpConnPair(t)
 	start := time.Now()
 	buf := make([]byte, 2048)
-	if waitForSteadyStateResponse(client, buf, 1, "1") {
+	if waitForSteadyStateResponse(context.Background(), client, buf, 1, "1") {
 		t.Fatal("expected no response to time out")
 	}
 	if elapsed := time.Since(start); elapsed >= steadyStateEchoDeadline+startupRetryInterval {

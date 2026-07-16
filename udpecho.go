@@ -140,12 +140,15 @@ func runUDPEchoPinger(ctx context.Context, tunnelNet *netstack.Net, secret strin
 
 		var matched bool
 		if requestID == 0 {
-			matched = waitForStartupResponse(conn, buf, requestID, request.RequestID, started, func() error {
+			matched = waitForStartupResponse(ctx, conn, buf, requestID, request.RequestID, started, func() error {
 				_, err := conn.Write(payload)
 				return err
 			})
 		} else {
-			matched = waitForSteadyStateResponse(conn, buf, requestID, request.RequestID)
+			matched = waitForSteadyStateResponse(ctx, conn, buf, requestID, request.RequestID)
+		}
+		if ctx.Err() != nil {
+			return nil
 		}
 
 		event, firstSuccess := health.observe(matched)
@@ -184,12 +187,17 @@ func isTimeout(err error) bool {
 
 // waitForSteadyStateResponse waits a single steadyStateEchoDeadline for a
 // reply matching wantID, discarding anything else.
-func waitForSteadyStateResponse(conn net.Conn, buf []byte, requestID int, wantID string) bool {
+func waitForSteadyStateResponse(ctx context.Context, conn net.Conn, buf []byte, requestID int, wantID string) bool {
 	deadline := time.Now().Add(steadyStateEchoDeadline)
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
+	defer stop()
 	for {
 		_ = conn.SetReadDeadline(deadline)
 		n, err := conn.Read(buf)
 		if err != nil {
+			if ctx.Err() != nil {
+				return false
+			}
 			if isTimeout(err) {
 				appLog.Warn("UDP echo request timed out", "request_id", requestID, "error", err)
 			} else {
@@ -213,8 +221,10 @@ func waitForSteadyStateResponse(conn net.Conn, buf []byte, requestID int, wantID
 // waitForStartupResponse re-arms the read deadline instead of giving up
 // after one timeout, so a reply delayed by a WireGuard handshake retry
 // still matches request 0 rather than being discarded as stale.
-func waitForStartupResponse(conn net.Conn, buf []byte, requestID int, wantID string, started time.Time, resend func() error) bool {
+func waitForStartupResponse(ctx context.Context, conn net.Conn, buf []byte, requestID int, wantID string, started time.Time, resend func() error) bool {
 	ceiling := started.Add(startupCeiling)
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
+	defer stop()
 	for {
 		now := time.Now()
 		if !now.Before(ceiling) {
@@ -228,6 +238,9 @@ func waitForStartupResponse(conn net.Conn, buf []byte, requestID int, wantID str
 		_ = conn.SetReadDeadline(deadline)
 		n, err := conn.Read(buf)
 		if err != nil {
+			if ctx.Err() != nil {
+				return false
+			}
 			if !isTimeout(err) {
 				appLog.Error("UDP echo startup probe failed", "request_id", requestID, "error", err)
 				return false
