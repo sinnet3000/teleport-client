@@ -193,6 +193,9 @@ func waitForSteadyStateResponse(ctx context.Context, conn net.Conn, buf []byte, 
 	defer stop()
 	for {
 		_ = conn.SetReadDeadline(deadline)
+		if ctx.Err() != nil {
+			return false
+		}
 		n, err := conn.Read(buf)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -236,6 +239,9 @@ func waitForStartupResponse(ctx context.Context, conn net.Conn, buf []byte, requ
 			deadline = ceiling
 		}
 		_ = conn.SetReadDeadline(deadline)
+		if ctx.Err() != nil {
+			return false
+		}
 		n, err := conn.Read(buf)
 		if err != nil {
 			if ctx.Err() != nil {
