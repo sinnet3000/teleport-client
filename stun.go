@@ -90,6 +90,10 @@ func stunNetwork(family networkFamily) (string, error) {
 }
 
 func reflexiveCandidateFromConn(conn *net.UDPConn, ice []iceServer, family networkFamily) (candidate, error) {
+	return reflexiveCandidateFromConnWithTimeout(conn, ice, family, 5*time.Second)
+}
+
+func reflexiveCandidateFromConnWithTimeout(conn *net.UDPConn, ice []iceServer, family networkFamily, timeout time.Duration) (candidate, error) {
 	network, err := stunNetwork(family)
 	if err != nil {
 		return candidate{}, err
@@ -112,8 +116,14 @@ func reflexiveCandidateFromConn(conn *net.UDPConn, ice []iceServer, family netwo
 	req, _ := stunRequest()
 	// This socket is later handed to WireGuard. Restrict only the STUN read:
 	// SetDeadline would leave a write deadline behind and make all later
-	// WireGuard sends fail once the five-second STUN timeout expires.
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// WireGuard sends fail once the discovery timeout expires. Clear even the
+	// read-only deadline before handing the socket to nomination; otherwise a
+	// listener already blocked in ReadFromUDP exits when this stale deadline
+	// fires.
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return candidate{}, err
+	}
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 	if _, err := conn.WriteToUDP(req, addr); err != nil {
 		return candidate{}, err
 	}

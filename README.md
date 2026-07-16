@@ -128,35 +128,12 @@ teleport-client -4 --session-file ~/.config/teleport-client/session.json
 teleport-client -6 --session-file ~/.config/teleport-client/session.json
 ```
 
-## Force the TURN relay
-
-Use `--turn` when direct traversal is known to fail and the console should use
-its advertised TURN relay for the tunnel path:
-
-```sh
-teleport-client --turn \
-  --session-file ~/.config/teleport-client/session.json
-```
-
-TURN-only mode intentionally still performs STUN discovery and sends the full
-ICE configuration in CONNECT. Console `teleportd` requires a usable `stun:`
-URL before it creates the peer, starts its TURN worker only for a
-`turn:...?...transport=udp` URL, and uses the client's `reflex` candidate to
-create the relay permission. The client then probes, accepts nomination from,
-and retries only console candidates whose type is `turn`.
-
-`--turn` fails with a specific prerequisite error when the ICE response has no
-supported UDP TURN URL, STUN discovery cannot produce a reflex candidate, or
-the console returns no relay candidate. It cannot be combined with
-`--endpoint`.
-
 ## Useful flags
 
 - `--name <name>`: set the Teleport client name.
 - `--debug`: enable debug logging.
 - `--endpoint <host:port>`: force the WireGuard endpoint.
-- `--turn`: require and use a console TURN relay while retaining STUN
-  discovery.
+- `--turn`: require and use a console TURN relay.
 - `--print-config`: print the WireGuard configuration and exit.
 - `--socks5 <host:port>`: set the SOCKS5 listen address (default
   `127.0.0.1:1080`).

@@ -1,6 +1,13 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/pion/stun"
+)
 
 func TestStunIntegrityUsesRawSessionSecret(t *testing.T) {
 	const secret = "raw-session-secret"
@@ -64,5 +71,70 @@ func TestValidateTurnPrerequisitesPreservesReflexCandidate(t *testing.T) {
 	}
 	if err := validateTurnPrerequisites(ice, []candidate{{Type: "iface", Addr: "192.168.1.10:5000"}}); err == nil {
 		t.Fatal("TURN prerequisites accepted without a reflex candidate")
+	}
+}
+
+func TestReflexiveDiscoveryClearsReadDeadline(t *testing.T) {
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	client, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1500)
+		n, peer, err := server.ReadFromUDP(buf)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		request, ok := parseStunMessage(buf[:n])
+		if !ok {
+			serverErr <- errors.New("test server received invalid STUN request")
+			return
+		}
+		response := stun.MustBuild(
+			stun.NewTransactionIDSetter(request.TransactionID),
+			stun.BindingSuccess,
+			&stun.XORMappedAddress{IP: net.IPv4(203, 0, 113, 10), Port: 45678},
+		)
+		_, err = server.WriteToUDP(response.Raw, peer)
+		serverErr <- err
+	}()
+
+	ice := []iceServer{{URLs: []string{"stun:" + server.LocalAddr().String()}}}
+	if _, err := reflexiveCandidateFromConnWithTimeout(client, ice, familyIPv4, 200*time.Millisecond); err != nil {
+		t.Fatalf("reflexive discovery failed: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("STUN server failed: %v", err)
+	}
+
+	// Let the discovery deadline expire, then prove the same socket can still
+	// receive nomination traffic. Before the fix ReadFromUDP returned an
+	// immediate timeout here.
+	time.Sleep(250 * time.Millisecond)
+	if _, err := server.WriteToUDP([]byte("nomination"), client.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatal(err)
+	}
+	readResult := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 32)
+		_, _, err := client.ReadFromUDP(buf)
+		readResult <- err
+	}()
+	select {
+	case err := <-readResult:
+		if err != nil {
+			t.Fatalf("socket retained discovery read deadline: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for post-discovery nomination packet")
 	}
 }
