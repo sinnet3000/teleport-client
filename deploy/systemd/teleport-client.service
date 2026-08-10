@@ -1,0 +1,13 @@
+[Unit]
+Description=Teleport client SOCKS5 proxy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/teleport-client --session-file %h/.config/teleport-client/session.json --socks5 127.0.0.1:1080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

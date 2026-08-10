@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.teleport-client</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/__USER__/.local/bin/teleport-client</string>
+    <string>--session-file</string>
+    <string>/Users/__USER__/.config/teleport-client/session.json</string>
+    <string>--socks5</string>
+    <string>127.0.0.1:1080</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/__USER__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/__USER__/Library/Logs/teleport-client.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/__USER__/Library/Logs/teleport-client.log</string>
+</dict>
+</plist>

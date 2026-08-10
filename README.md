@@ -138,6 +138,66 @@ teleport-client -6 --session-file ~/.config/teleport-client/session.json
 - `--socks5 <host:port>`: set the SOCKS5 listen address (default
   `127.0.0.1:1080`).
 
+## Run as a service
+
+Use the OS service manager to keep the client running. Pair once before you
+install a service; the service reads the saved session on every start. Keep
+invite URLs and session files out of service definitions.
+
+### macOS (`launchd`)
+
+Build the binary, copy the template, and replace `__USER__` with your account
+name.
+
+```sh
+mkdir -p ~/.local/bin ~/.config/teleport-client ~/Library/LaunchAgents
+go build -o ~/.local/bin/teleport-client .
+cp deploy/launchd/com.example.teleport-client.plist \
+  ~/Library/LaunchAgents/com.example.teleport-client.plist
+sed -i '' "s/__USER__/$(id -un)/g" \
+  ~/Library/LaunchAgents/com.example.teleport-client.plist
+launchctl bootstrap "gui/$(id -u)" \
+  ~/Library/LaunchAgents/com.example.teleport-client.plist
+```
+
+The agent starts at login and writes to `~/Library/Logs/teleport-client.log`.
+To stop and remove it:
+
+```sh
+launchctl bootout "gui/$(id -u)" \
+  ~/Library/LaunchAgents/com.example.teleport-client.plist
+```
+
+### Linux (`systemd --user`)
+
+Install the binary at the path used by the unit, then enable the per-user
+service:
+
+```sh
+go build -o teleport-client .
+sudo install -m 0755 teleport-client /usr/local/bin/teleport-client
+mkdir -p ~/.config/systemd/user ~/.config/teleport-client
+cp deploy/systemd/teleport-client.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now teleport-client.service
+```
+
+On a server, enable lingering once so this user service starts after boot:
+
+```sh
+sudo loginctl enable-linger "$USER"
+```
+
+Check the service and follow its logs with:
+
+```sh
+systemctl --user status teleport-client.service
+journalctl --user -u teleport-client.service -f
+```
+
+The unit reads `~/.config/teleport-client/session.json`. Pair with that path,
+or change `--session-file` in your copied unit.
+
 ## Verification
 
 ```sh
