@@ -214,7 +214,8 @@ func waitForSteadyStateResponse(ctx context.Context, conn net.Conn, buf []byte, 
 			continue
 		}
 		if responseID != wantID {
-			appLog.Warn("discarded stale UDP echo response", "request_id", requestID, "response_id", responseID)
+			// A late reply from a retransmitted startup probe is harmless.
+			appLog.Debug("discarded stale UDP echo response", "request_id", requestID, "response_id", responseID)
 			continue
 		}
 		return true
