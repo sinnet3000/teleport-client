@@ -478,8 +478,16 @@ func (l *earlyNominationListener) readLoop(conn *net.UDPConn, done <-chan struct
 	}
 }
 
+// maxEarlyNominationLogs bounds the packet log so a connection attempt stuck
+// retrying candidates for a long time can't grow this without limit; the
+// oldest entries are dropped first.
+const maxEarlyNominationLogs = 500
+
 func (l *earlyNominationListener) appendLog(p packetLog) {
 	l.mu.Lock()
+	if len(l.logs) >= maxEarlyNominationLogs {
+		l.logs = l.logs[1:]
+	}
 	l.logs = append(l.logs, p)
 	l.mu.Unlock()
 }
@@ -548,7 +556,7 @@ func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string,
 		conn   *net.UDPConn
 	}
 	var targets []target
-	targetByAddr := make(map[string]string, len(ordered))
+	rankByRemote := make(map[string]int, len(ordered))
 	for _, c := range ordered {
 		ap, err := netip.ParseAddrPort(c.Addr)
 		if err != nil {
@@ -563,7 +571,7 @@ func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string,
 		}
 		remote := net.UDPAddrFromAddrPort(ap)
 		targets = append(targets, target{addr: c.Addr, remote: remote, conn: conn})
-		targetByAddr[remote.String()] = c.Addr
+		rankByRemote[remote.String()] = len(targets) - 1
 	}
 
 	if len(targets) == 0 {
@@ -621,14 +629,8 @@ func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string,
 	for {
 		select {
 		case resp := <-responses:
-			if matchedAddr, ok := targetByAddr[resp.remote.String()]; ok {
-				rank := -1
-				for i, t := range targets {
-					if t.addr == matchedAddr {
-						rank = i
-						break
-					}
-				}
+			if rank, ok := rankByRemote[resp.remote.String()]; ok {
+				matchedAddr := targets[rank].addr
 				if rank == 0 {
 					// Top-ranked candidate answered; nothing can beat it.
 					appLog.Debug("fallback probe result", "candidate", matchedAddr, "matched", true, "rank", 0)
