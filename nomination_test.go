@@ -283,7 +283,7 @@ func TestProbeCandidatesSendsAuthenticatedBindingRequest(t *testing.T) {
 			result <- fmt.Errorf("fallback probe was not an authenticated Binding Request")
 			return
 		}
-		_, err = peer.WriteToUDP(stunBindingSuccess(msg, remote, secret), remote)
+		_, err = peer.WriteToUDP(stunBindingSuccess(msg, secret), remote)
 		result <- err
 	}()
 
@@ -296,6 +296,66 @@ func TestProbeCandidatesSendsAuthenticatedBindingRequest(t *testing.T) {
 	if got != addr {
 		t.Fatalf("probeCandidates = %q, want %q", got, addr)
 	}
+}
+
+// TestProbeCandidatesLatencyWhenFirstCandidateUnresponsive verifies that an
+// unresponsive candidate does not cause head-of-line blocking when another
+// responsive candidate is available.
+func TestProbeCandidatesLatencyWhenFirstCandidateUnresponsive(t *testing.T) {
+	const secret = "fallback-latency-secret"
+	// Responsive peer
+	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	local, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, remote, err := peer.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			msg, ok := parseStunMessage(buf[:n])
+			if ok && msg.Type == stun.BindingRequest {
+				_, _ = peer.WriteToUDP(stunBindingSuccess(msg, secret), remote)
+				return
+			}
+		}
+	}()
+
+	// Unresponsive port
+	deadConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadAddr := deadConn.LocalAddr().String()
+	deadConn.Close() // closed port will not answer
+
+	liveAddr := peer.LocalAddr().String()
+	cands := []candidate{
+		{Type: "iface", Addr: deadAddr},
+		{Type: "iface", Addr: liveAddr},
+	}
+	ourLocal := []candidate{{Type: "iface", Addr: "127.0.0.1:1"}}
+
+	start := time.Now()
+	got := probeCandidates(&udpSockets{V4: local}, cands, secret, ourLocal)
+	elapsed := time.Since(start)
+
+	if got != liveAddr {
+		t.Fatalf("probeCandidates = %q, want %q", got, liveAddr)
+	}
+	if elapsed >= 200*time.Millisecond {
+		t.Fatalf("probeCandidates took %v, expected < 200ms (head-of-line blocking regression)", elapsed)
+	}
+	t.Logf("probeCandidates took %v to find live candidate after 1 dead candidate", elapsed)
 }
 
 func TestAcceptBindingSuccessRequiresProbedAddressAndMatchingTransactionID(t *testing.T) {

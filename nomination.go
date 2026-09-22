@@ -658,6 +658,17 @@ func rankCandidates(c []candidate) []candidate {
 func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string, local []candidate) string {
 	ordered := compatibleCandidates(s, cands, local)
 	appLog.Debug("fallback probe starting", "candidates", len(ordered))
+	if s == nil || len(ordered) == 0 {
+		return guessCandidate(ordered)
+	}
+
+	type target struct {
+		addr   string
+		remote *net.UDPAddr
+		conn   *net.UDPConn
+	}
+	var targets []target
+	targetByAddr := make(map[string]string, len(ordered))
 	for _, c := range ordered {
 		host, _, err := net.SplitHostPort(c.Addr)
 		if err != nil {
@@ -674,29 +685,107 @@ func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string,
 		if err != nil {
 			continue
 		}
-		req, _ := stunBindingProbe(sessionSecretHash)
-		deadline := time.Now().Add(350 * time.Millisecond)
-		_ = conn.SetReadDeadline(deadline)
-		_, _ = conn.WriteToUDP(req, remote)
+		targets = append(targets, target{addr: c.Addr, remote: remote, conn: conn})
+		targetByAddr[remote.String()] = c.Addr
+	}
+
+	if len(targets) == 0 {
+		return guessCandidate(ordered)
+	}
+
+	type responsePacket struct {
+		remote *net.UDPAddr
+	}
+	responses := make(chan responsePacket, len(targets)+4)
+	reader := newUDPReadStopper(s)
+	reader.start(s.V4, func(conn *net.UDPConn, done <-chan struct{}) {
 		buf := make([]byte, 1500)
-		matched := false
 		for {
-			_, addr, err := conn.ReadFromUDP(buf)
-			if err != nil {
-				break
+			_, addr, ok := readUDPPacket(conn, done, buf)
+			if !ok {
+				return
 			}
-			if addr.String() == remote.String() {
-				matched = true
-				break
+			select {
+			case responses <- responsePacket{remote: addr}:
+			case <-done:
+				return
 			}
-			// Stray packet from something other than this candidate; keep
-			// reading until the deadline instead of moving on immediately.
 		}
-		appLog.Debug("fallback probe result", "candidate", c.Addr, "matched", matched)
-		if matched {
-			return c.Addr
+	})
+	reader.start(s.V6, func(conn *net.UDPConn, done <-chan struct{}) {
+		buf := make([]byte, 1500)
+		for {
+			_, addr, ok := readUDPPacket(conn, done, buf)
+			if !ok {
+				return
+			}
+			select {
+			case responses <- responsePacket{remote: addr}:
+			case <-done:
+				return
+			}
+		}
+	})
+	defer reader.Stop()
+
+	for _, t := range targets {
+		req, _ := stunBindingProbe(sessionSecretHash)
+		_, _ = t.conn.WriteToUDP(req, t.remote)
+		appLog.Debug("fallback probe sent", "candidate", t.addr)
+	}
+
+	timer := time.NewTimer(500 * time.Millisecond)
+	defer timer.Stop()
+
+	bestRank := -1
+	var graceTimer *time.Timer
+	var graceCh <-chan time.Time
+
+	for {
+		select {
+		case resp := <-responses:
+			if matchedAddr, ok := targetByAddr[resp.remote.String()]; ok {
+				rank := -1
+				for i, t := range targets {
+					if t.addr == matchedAddr {
+						rank = i
+						break
+					}
+				}
+				if rank == 0 {
+					// Top-ranked candidate answered; nothing can beat it.
+					appLog.Debug("fallback probe result", "candidate", matchedAddr, "matched", true, "rank", 0)
+					return matchedAddr
+				}
+				if bestRank == -1 || rank < bestRank {
+					bestRank = rank
+					appLog.Debug("fallback probe candidate responded", "candidate", matchedAddr, "rank", rank)
+					if graceTimer == nil {
+						graceTimer = time.NewTimer(60 * time.Millisecond)
+						defer graceTimer.Stop()
+						graceCh = graceTimer.C
+					}
+				}
+			}
+		case <-graceCh:
+			if bestRank >= 0 && bestRank < len(targets) {
+				selected := targets[bestRank].addr
+				appLog.Debug("fallback probe result after grace period", "candidate", selected, "matched", true, "rank", bestRank)
+				return selected
+			}
+		case <-timer.C:
+			if bestRank >= 0 && bestRank < len(targets) {
+				selected := targets[bestRank].addr
+				appLog.Debug("fallback probe result", "candidate", selected, "matched", true, "rank", bestRank)
+				return selected
+			}
+			appLog.Debug("fallback probe timed out; falling back to guess")
+			return guessCandidate(ordered)
 		}
 	}
+}
+
+func guessCandidate(ordered []candidate) string {
 	// Nothing answered; guess. Prefer a publicly routable candidate
 	// (reflex/turn) over a private/loopback/link-local iface address,
 	// which is almost certainly unreachable unless we share the peer's LAN.

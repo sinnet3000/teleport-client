@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -169,10 +170,7 @@ func validStunIntegrity(msg *stun.Message, key string) bool {
 	return key != "" && stun.NewShortTermIntegrity(key).Check(msg) == nil
 }
 
-func stunBindingSuccess(req *stun.Message, peer *net.UDPAddr, secHash string) []byte {
-	if peer == nil {
-		return nil
-	}
+func stunBindingSuccess(req *stun.Message, secHash string) []byte {
 	var setters []stun.Setter
 	setters = append(setters, stun.NewTransactionIDSetter(req.TransactionID), stun.BindingSuccess)
 	if secHash != "" {
@@ -182,31 +180,37 @@ func stunBindingSuccess(req *stun.Message, peer *net.UDPAddr, secHash string) []
 	return msg.Raw
 }
 
-// respondToStunBindingRequest validates an inbound STUN Binding Request's
+// respondToStunBindingRequestAddrPort validates an inbound STUN Binding Request's
 // MESSAGE-INTEGRITY, replies with Binding Success over conn, and feeds any
-// nomination DATA payload to tracker (which may be nil where no nomination
-// tracking applies). accepted is false, with no reply sent, if integrity
-// validation fails; callers should discard the packet in that case instead
-// of treating the sender as a verified peer.
-func respondToStunBindingRequest(conn *net.UDPConn, msg *stun.Message, addr *net.UDPAddr, secretHash string, tracker *nominationTracker) (response []byte, accepted bool) {
+// nomination DATA payload to tracker. Zero allocations for address representation.
+func respondToStunBindingRequestAddrPort(conn *net.UDPConn, msg *stun.Message, addrPort netip.AddrPort, secretHash string, tracker *nominationTracker) (response []byte, accepted bool) {
 	if !validStunIntegrity(msg, secretHash) {
-		appLog.Debug("discarded STUN request with invalid integrity", "remote", addr.String())
+		appLog.Debug("discarded STUN request with invalid integrity", "remote", addrPort.String())
 		return nil, false
 	}
-	if resp := stunBindingSuccess(msg, addr, secretHash); resp != nil {
-		_, _ = conn.WriteToUDP(resp, addr)
-		appLog.Debug("sent STUN success response", "remote", addr.String())
+	if resp := stunBindingSuccess(msg, secretHash); resp != nil {
+		if conn != nil {
+			_, _ = conn.WriteToUDPAddrPort(resp, addrPort)
+		}
+		appLog.Debug("sent STUN success response", "remote", addrPort.String())
 		response = resp
 	}
 	if tracker != nil {
 		if waitMs, ok := stunNominationWait(msg); ok {
-			appLog.Debug("nomination sequence progress", "remote", addr.String(), "wait_ms", waitMs)
-			if tracker.observe(addr.String(), waitMs) {
-				appLog.Info("nomination selected endpoint", "endpoint", addr.String())
+			appLog.Debug("nomination sequence progress", "remote", addrPort.String(), "wait_ms", waitMs)
+			if tracker.observe(addrPort.String(), waitMs) {
+				appLog.Info("nomination selected endpoint", "endpoint", addrPort.String())
 			}
 		}
 	}
 	return response, true
+}
+
+func respondToStunBindingRequest(conn *net.UDPConn, msg *stun.Message, addr *net.UDPAddr, secretHash string, tracker *nominationTracker) (response []byte, accepted bool) {
+	if addr == nil {
+		return nil, false
+	}
+	return respondToStunBindingRequestAddrPort(conn, msg, addr.AddrPort(), secretHash, tracker)
 }
 
 func isSTUN(data []byte) bool {

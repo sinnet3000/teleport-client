@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"runtime"
 	"strings"
 	"sync"
@@ -123,24 +124,24 @@ func (b *stunBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	return fns, port, nil
 }
 
-func (b *stunBind) handleSTUN(c *net.UDPConn, data []byte, addr *net.UDPAddr) {
+func (b *stunBind) handleSTUN(c *net.UDPConn, data []byte, addrPort netip.AddrPort) {
 	msg, ok := parseStunMessage(data)
 	if !ok {
 		return
 	}
 	if appLog.IsDebug() {
 		n := b.stunCount.Add(1)
-		appLog.Debug("received STUN packet", "type", msg.Type.String(), "remote", addr.String(), "count", n)
+		appLog.Debug("received STUN packet", "type", msg.Type.String(), "remote", addrPort.String(), "count", n)
 	}
 	if msg.Type == stun.BindingRequest {
-		respondToStunBindingRequest(c, msg, addr, b.stunSecretHash, b.nomination)
+		respondToStunBindingRequestAddrPort(c, msg, addrPort, b.stunSecretHash, b.nomination)
 	}
 }
 
 func (b *stunBind) makeRecvFunc(c *net.UDPConn, done chan struct{}) conn.ReceiveFunc {
 	return func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
 		for {
-			n, addr, err := c.ReadFromUDP(packets[0])
+			n, addrPort, err := c.ReadFromUDPAddrPort(packets[0])
 			if err != nil {
 				// If Close() woke us (deadline/socket close), report ErrClosed so
 				// wireguard-go's receive routine exits and closeBindLocked's
@@ -153,15 +154,15 @@ func (b *stunBind) makeRecvFunc(c *net.UDPConn, done chan struct{}) conn.Receive
 				return 0, err
 			}
 			if isSTUN(packets[0][:n]) {
-				b.handleSTUN(c, packets[0][:n], addr)
+				b.handleSTUN(c, packets[0][:n], addrPort)
 				continue
 			}
 			if appLog.IsDebug() {
 				rn := b.recvCount.Add(1)
-				appLog.Debug("passing UDP packet to WireGuard", "bytes", n, "remote", addr.String(), "count", rn)
+				appLog.Debug("passing UDP packet to WireGuard", "bytes", n, "remote", addrPort.String(), "count", rn)
 			}
 			sizes[0] = n
-			eps[0] = &conn.StdNetEndpoint{AddrPort: addr.AddrPort()}
+			eps[0] = &conn.StdNetEndpoint{AddrPort: addrPort}
 			return 1, nil
 		}
 	}
@@ -169,7 +170,7 @@ func (b *stunBind) makeRecvFunc(c *net.UDPConn, done chan struct{}) conn.Receive
 
 func (b *stunBind) Close() error {
 	// We do not own the sockets' lifetime (main manages them), but we must
-	// unblock any receive goroutine parked in ReadFromUDP; otherwise
+	// unblock any receive goroutine parked in ReadFromUDPAddrPort; otherwise
 	// closeBindLocked -> stopping.Wait() can deadlock during BindUpdate/Down/Close.
 	b.mu.Lock()
 	if b.done != nil {
@@ -198,7 +199,6 @@ func (b *stunBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	if !ok {
 		return conn.ErrWrongEndpointType
 	}
-	addr := &net.UDPAddr{IP: se.AddrPort.Addr().AsSlice(), Port: int(se.AddrPort.Port())}
 	var udpConn *net.UDPConn
 	network := "udp4"
 	if se.AddrPort.Addr().Is4() && b.conn4 != nil {
@@ -206,14 +206,14 @@ func (b *stunBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	} else if !se.AddrPort.Addr().Is4() && b.conn6 != nil {
 		udpConn, network = b.conn6, "udp6"
 	} else {
-		return fmt.Errorf("no bound socket for endpoint %s address family", addr.String())
+		return fmt.Errorf("no bound socket for endpoint %s address family", se.AddrPort.String())
 	}
 	for _, buf := range bufs {
-		if _, err := udpConn.WriteToUDP(buf, addr); err != nil {
+		if _, err := udpConn.WriteToUDPAddrPort(buf, se.AddrPort); err != nil {
 			return err
 		}
 		if appLog.IsDebug() {
-			appLog.Debug("sent WireGuard UDP packet", "bytes", len(buf), "remote", addr.String(), "network", network)
+			appLog.Debug("sent WireGuard UDP packet", "bytes", len(buf), "remote", se.AddrPort.String(), "network", network)
 		}
 	}
 	return nil
