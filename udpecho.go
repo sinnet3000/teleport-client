@@ -264,7 +264,7 @@ func waitForSteadyStateResponse(ctx context.Context, conn net.Conn, buf []byte, 
 func waitForStartupResponse(ctx context.Context, conn net.Conn, buf []byte, requestID int, wantID string, started time.Time, resend func() error) bool {
 	timeout := startupCeiling - time.Since(started)
 	if timeout <= 0 {
-		timeout = startupRetryInterval
+		return false
 	}
 	return waitForEchoResponse(ctx, conn, buf, requestID, wantID, timeout, startupRetryInterval, resend, true)
 }

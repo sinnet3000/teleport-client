@@ -69,6 +69,13 @@ func TestDebugAPIErrorResponseRedactsCredentials(t *testing.T) {
 			t.Fatalf("debug API response omitted %q: %s", wanted, got)
 		}
 	}
+
+	// Non-JSON response bodies must never have their raw contents dumped into logs.
+	var nonJSONOutput bytes.Buffer
+	debugAPIErrorResponse(newAppLogger(&nonJSONOutput, true), "POST", "/", []byte("raw plaintext error"), knownSecrets...)
+	if strings.Contains(nonJSONOutput.String(), "plaintext error") {
+		t.Fatal("debug API response exposed non-JSON body contents")
+	}
 }
 
 func TestCollectSensitiveStringsTraversesSensitiveSubtrees(t *testing.T) {

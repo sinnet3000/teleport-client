@@ -494,8 +494,8 @@ func connectAndAwaitResponse(ctx context.Context, session sessionResult, name, p
 // negotiateEndpoint determines which candidate address to use as the
 // WireGuard peer endpoint: an explicit --endpoint override, the master's
 // per-tuple nomination sequence, an inbound Binding Request observed by the
-// early listener, or — as a last resort — the late fallback listener in
-// waitForNomination. It also returns the ranked queue of candidates that sent
+// early listener, or — as a last resort — concurrent candidate probing via
+// probeCandidates. It also returns the ranked queue of candidates that sent
 // us a Binding Request, for the post-connect endpoint retry loop.
 func negotiateEndpoint(ctx context.Context, endpointOverride string, forceTurn bool, sockets *udpSockets, port int, connResp *apiResponse, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate) (endpoint, mode string, candidateQueue []string, candidateTypes map[string]string, err error) {
 	peerCandidates := connResp.ServerInfo.PeerDesc.Candidates
@@ -538,7 +538,7 @@ func candidatesOfType(candidates []candidate, candidateType string) []candidate 
 }
 
 // resolveNominatedEndpoint tries per-tuple nomination, then an observed
-// inbound Binding Request, then the blocking waitForNomination fallback.
+// inbound Binding Request, then the fallback probeCandidates fan-out.
 func resolveNominatedEndpoint(ctx context.Context, sockets *udpSockets, port int, peerCandidates []candidate, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate) (endpoint, mode string, candidateQueue []string, err error) {
 	// The Android bridge waits up to 40s for a verified per-tuple sequence.
 	nomination.activate()
