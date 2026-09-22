@@ -185,57 +185,22 @@ func isTimeout(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
-// waitForSteadyStateResponse waits a single steadyStateEchoDeadline for a
-// reply matching wantID, discarding anything else.
-func waitForSteadyStateResponse(ctx context.Context, conn net.Conn, buf []byte, requestID int, wantID string) bool {
-	deadline := time.Now().Add(steadyStateEchoDeadline)
-	stop := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
-	defer stop()
-	for {
-		_ = conn.SetReadDeadline(deadline)
-		if ctx.Err() != nil {
-			return false
-		}
-		n, err := conn.Read(buf)
-		if err != nil {
-			if ctx.Err() != nil {
-				return false
-			}
-			if isTimeout(err) {
-				appLog.Warn("UDP echo request timed out", "request_id", requestID, "error", err)
-			} else {
-				appLog.Error("UDP echo read failed", "request_id", requestID, "error", err)
-			}
-			return false
-		}
-		responseID, err := parseUDPEchoResponse(buf[:n])
-		if err != nil {
-			appLog.Debug("invalid UDP echo response", "request_id", requestID, "parsed_id", responseID, "response_bytes", n, "error", err)
-			continue
-		}
-		if responseID != wantID {
-			// A late reply from a retransmitted startup probe is harmless.
-			appLog.Debug("discarded stale UDP echo response", "request_id", requestID, "response_id", responseID)
-			continue
-		}
-		return true
-	}
-}
-
-// waitForStartupResponse re-arms the read deadline instead of giving up
-// after one timeout, so a reply delayed by a WireGuard handshake retry
-// still matches request 0 rather than being discarded as stale.
-func waitForStartupResponse(ctx context.Context, conn net.Conn, buf []byte, requestID int, wantID string, started time.Time, resend func() error) bool {
-	ceiling := started.Add(startupCeiling)
+func waitForEchoResponse(ctx context.Context, conn net.Conn, buf []byte, requestID int, wantID string, timeout, retryInterval time.Duration, resend func() error, isStartup bool) bool {
+	started := time.Now()
+	ceiling := started.Add(timeout)
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
 	defer stop()
 	for {
 		now := time.Now()
 		if !now.Before(ceiling) {
-			appLog.Error("UDP echo startup probe failed", "request_id", requestID, "elapsed", now.Sub(started).Round(time.Second))
+			if isStartup {
+				appLog.Error("UDP echo startup probe failed", "request_id", requestID, "elapsed", now.Sub(started).Round(time.Second))
+			} else {
+				appLog.Warn("UDP echo request timed out", "request_id", requestID)
+			}
 			return false
 		}
-		deadline := now.Add(startupRetryInterval)
+		deadline := now.Add(retryInterval)
 		if deadline.After(ceiling) {
 			deadline = ceiling
 		}
@@ -249,7 +214,15 @@ func waitForStartupResponse(ctx context.Context, conn net.Conn, buf []byte, requ
 				return false
 			}
 			if !isTimeout(err) {
-				appLog.Error("UDP echo startup probe failed", "request_id", requestID, "error", err)
+				if isStartup {
+					appLog.Error("UDP echo startup probe failed", "request_id", requestID, "error", err)
+				} else {
+					appLog.Error("UDP echo read failed", "request_id", requestID, "error", err)
+				}
+				return false
+			}
+			if !isStartup {
+				appLog.Warn("UDP echo request timed out", "request_id", requestID, "error", err)
 				return false
 			}
 			appLog.Debug("UDP echo startup probe still waiting", "request_id", requestID, "elapsed", time.Since(started).Round(time.Second))
@@ -268,11 +241,32 @@ func waitForStartupResponse(ctx context.Context, conn net.Conn, buf []byte, requ
 			continue
 		}
 		if responseID != wantID {
-			appLog.Debug("discarded unexpected UDP echo response during startup", "request_id", requestID, "response_id", responseID)
+			if isStartup {
+				appLog.Debug("discarded unexpected UDP echo response during startup", "request_id", requestID, "response_id", responseID)
+			} else {
+				appLog.Debug("discarded stale UDP echo response", "request_id", requestID, "response_id", responseID)
+			}
 			continue
 		}
 		return true
 	}
+}
+
+// waitForSteadyStateResponse waits a single steadyStateEchoDeadline for a
+// reply matching wantID, discarding anything else.
+func waitForSteadyStateResponse(ctx context.Context, conn net.Conn, buf []byte, requestID int, wantID string) bool {
+	return waitForEchoResponse(ctx, conn, buf, requestID, wantID, steadyStateEchoDeadline, steadyStateEchoDeadline, nil, false)
+}
+
+// waitForStartupResponse re-arms the read deadline instead of giving up
+// after one timeout, so a reply delayed by a WireGuard handshake retry
+// still matches request 0 rather than being discarded as stale.
+func waitForStartupResponse(ctx context.Context, conn net.Conn, buf []byte, requestID int, wantID string, started time.Time, resend func() error) bool {
+	timeout := startupCeiling - time.Since(started)
+	if timeout <= 0 {
+		timeout = startupRetryInterval
+	}
+	return waitForEchoResponse(ctx, conn, buf, requestID, wantID, timeout, startupRetryInterval, resend, true)
 }
 
 // parseUDPEchoResponse accepts req_id encoded as either a string or number.

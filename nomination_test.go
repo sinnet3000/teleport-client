@@ -358,37 +358,6 @@ func TestProbeCandidatesLatencyWhenFirstCandidateUnresponsive(t *testing.T) {
 	t.Logf("probeCandidates took %v to find live candidate after 1 dead candidate", elapsed)
 }
 
-func TestAcceptBindingSuccessRequiresProbedAddressAndMatchingTransactionID(t *testing.T) {
-	const addr = "192.0.2.1:5000"
-	_, tx := stunRequest()
-	probed := map[string][][12]byte{addr: {tx}}
-
-	matching := stun.MustBuild(stun.NewTransactionIDSetter(tx), stun.BindingSuccess)
-	if !acceptBindingSuccess(probed, addr, matching) {
-		t.Fatal("rejected a Binding Success from a probed address with the matching transaction ID")
-	}
-
-	if acceptBindingSuccess(probed, "192.0.2.2:5000", matching) {
-		t.Fatal("accepted a Binding Success from an address we never probed")
-	}
-
-	_, otherTx := stunRequest()
-	mismatched := stun.MustBuild(stun.NewTransactionIDSetter(otherTx), stun.BindingSuccess)
-	if acceptBindingSuccess(probed, addr, mismatched) {
-		t.Fatal("accepted a Binding Success with a transaction ID we never sent, from a probed address")
-	}
-
-	// A delayed response to an earlier probe must still be accepted even
-	// after a later tick has re-probed the same address with a new
-	// transaction ID.
-	_, newerTx := stunRequest()
-	probed[addr] = append(probed[addr], newerTx)
-	stale := stun.MustBuild(stun.NewTransactionIDSetter(tx), stun.BindingSuccess)
-	if !acceptBindingSuccess(probed, addr, stale) {
-		t.Fatal("rejected a delayed Binding Success matching an earlier outstanding probe")
-	}
-}
-
 func TestRespondToStunBindingRequestRejectsInvalidIntegrity(t *testing.T) {
 	msg := stun.MustBuild(stun.TransactionID, stun.BindingRequest,
 		stun.NewShortTermIntegrity("wrong-secret"))

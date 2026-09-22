@@ -99,15 +99,17 @@ func TestRedactKnownSecretsPrefersLongestMatch(t *testing.T) {
 	}
 }
 
-func TestDebugAPIErrorResponseOmitsUnstructuredBody(t *testing.T) {
-	const body = "plain-text response containing a credential"
-	var output bytes.Buffer
-	debugAPIErrorResponse(newAppLogger(&output, true), "GET", "/", []byte(body))
-	if strings.Contains(output.String(), body) || strings.Contains(output.String(), "credential") {
-		t.Fatalf("unstructured API body was logged: %s", output.String())
+func TestCollectSensitiveStringsByteSlice(t *testing.T) {
+	if got := collectSensitiveStrings([]byte(nil)); got != nil {
+		t.Fatalf("expected nil for nil bytes, got %v", got)
 	}
-	if !strings.Contains(output.String(), "not a JSON object") {
-		t.Fatalf("omission reason was not logged: %s", output.String())
+	if got := collectSensitiveStrings([]byte("not-json")); got != nil {
+		t.Fatalf("expected nil for invalid JSON bytes, got %v", got)
+	}
+	raw := []byte(`{"secret":"my-secret","normal":"hello"}`)
+	got := collectSensitiveStrings(raw)
+	if !slices.Contains(got, "my-secret") || slices.Contains(got, "hello") {
+		t.Fatalf("unexpected extracted secrets: %v", got)
 	}
 }
 

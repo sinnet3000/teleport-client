@@ -571,12 +571,11 @@ func resolveNominatedEndpoint(ctx context.Context, sockets *udpSockets, port int
 	}
 	if endpoint == "" {
 		early.Stop()
-		selection := waitForNomination(ctx, sockets, port, peerCandidates, stunSecretHash, local)
+		endpoint = probeCandidates(sockets, peerCandidates, stunSecretHash, local)
 		if err := ctx.Err(); err != nil {
 			return "", "", nil, err
 		}
-		endpoint = selection.Endpoint
-		mode = selection.Mode
+		mode = "fallback_probe"
 	}
 	return endpoint, mode, candidateQueue, nil
 }

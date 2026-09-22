@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -43,12 +44,6 @@ type peerDesc struct {
 	Candidates []candidate `json:"candidates"`
 	IceConfig  []iceServer `json:"ice_config,omitempty"`
 	IsMaster   bool        `json:"is_master"`
-}
-
-type endpointSelection struct {
-	Endpoint string
-	Mode     string
-	Packets  []packetLog
 }
 
 func listenPort() int {
@@ -518,129 +513,10 @@ func stunNominationWait(msg *stun.Message) (int, bool) {
 	return payload.Wait, true
 }
 
-// acceptBindingSuccess reports whether a Binding Success from addr echoes
-// back the transaction ID of a probe we actually sent it, rather than just
-// matching the source address (which a spoofed packet from a probed
-// candidate's IP could also do). Each address may have multiple outstanding
-// probes in flight, since a response can arrive after later ticks have
-// already re-probed the same address.
-func acceptBindingSuccess(probed map[string][][12]byte, addr string, msg *stun.Message) bool {
-	for _, tx := range probed[addr] {
-		if msg.TransactionID == tx {
-			return true
-		}
-	}
-	return false
-}
-
-// fallbackNominationTimeout is how long waitForNomination actively probes candidates
-// before falling back to concurrent probeCandidates.
-const fallbackNominationTimeout = 3 * time.Second
-
-func waitForNomination(ctx context.Context, s *udpSockets, port int, cands []candidate, sessionSecretHash string, local []candidate) endpointSelection {
-	if s == nil {
-		return endpointSelection{}
-	}
-	var logs []packetLog
-	type packet struct {
-		conn *net.UDPConn
-		addr *net.UDPAddr
-		data []byte
-	}
-	packets := make(chan packet, 16)
-	reader := newUDPReadStopper(s)
-	// No self-timeout in the read loop below: reader.Stop explicitly unblocks
-	// and cancels it on every return path, so re-arming a rolling deadline
-	// here would race with that cancellation and could overwrite it with a
-	// future deadline, hanging shutdown.
-	readLoop := func(conn *net.UDPConn, done <-chan struct{}) {
-		buf := make([]byte, 1500)
-		for {
-			n, addr, ok := readUDPPacket(conn, done, buf)
-			if !ok {
-				return
-			}
-			data := append([]byte(nil), buf[:n]...)
-			select {
-			case packets <- packet{conn: conn, addr: addr, data: data}:
-			case <-done:
-				return
-			}
-		}
-	}
-	reader.start(s.V4, readLoop)
-	reader.start(s.V6, readLoop)
-	defer reader.Stop()
-
-	done := time.After(fallbackNominationTimeout)
-	tick := time.NewTicker(400 * time.Millisecond)
-	defer tick.Stop()
-	ordered := rankCandidates(cands)
-	for i, c := range ordered {
-		appLog.Debug("nomination candidate ranked", "rank", i, "type", c.Type, "address", c.Addr)
-	}
-	// probed tracks the transaction IDs of the stunRequests we've sent to
-	// each address; see acceptBindingSuccess.
-	probed := map[string][][12]byte{}
-	for {
-		select {
-		case <-ctx.Done():
-			return endpointSelection{Packets: logs}
-		case pkt := <-packets:
-			logs = append(logs, logPacket("in", pkt.addr, pkt.data))
-			msg, ok := parseStunMessage(pkt.data)
-			if !ok {
-				continue
-			}
-			if msg.Type == stun.BindingRequest {
-				resp, accepted := respondToStunBindingRequest(pkt.conn, msg, pkt.addr, sessionSecretHash, nil)
-				if !accepted {
-					continue
-				}
-				if resp != nil {
-					logs = append(logs, logPacket("out", pkt.addr, resp))
-				}
-				return endpointSelection{Endpoint: pkt.addr.String(), Mode: "inbound_binding_request", Packets: logs}
-			}
-			if msg.Type == stun.BindingSuccess {
-				if !acceptBindingSuccess(probed, pkt.addr.String(), msg) {
-					appLog.Debug("discarded unsolicited STUN binding success", "remote", pkt.addr.String())
-					continue
-				}
-				return endpointSelection{Endpoint: pkt.addr.String(), Mode: "binding_success", Packets: logs}
-			}
-		case <-tick.C:
-			for _, c := range ordered {
-				remote, err := net.ResolveUDPAddr("udp", c.Addr)
-				if err != nil {
-					continue
-				}
-				conn := s.V4
-				if remote.IP.To4() == nil {
-					conn = s.V6
-				}
-				if conn == nil {
-					continue
-				}
-				req, tx := stunBindingProbe(sessionSecretHash)
-				_, _ = conn.WriteToUDP(req, remote)
-				addr := remote.String()
-				probed[addr] = append(probed[addr], tx)
-				logs = append(logs, logPacket("out", remote, req))
-				appLog.Debug("probed nomination candidate", "candidate", c.Addr, "type", c.Type)
-			}
-		case <-done:
-			reader.Stop()
-			return endpointSelection{Endpoint: probeCandidates(s, cands, sessionSecretHash, local), Mode: "fallback_probe", Packets: logs}
-		}
-	}
-}
-
 func rankCandidates(c []candidate) []candidate {
 	out := append([]candidate(nil), c...)
 	score := func(c candidate) int {
-		host, _, _ := net.SplitHostPort(c.Addr)
-		ip := net.ParseIP(strings.Trim(host, "[]"))
+		ap, _ := netip.ParseAddrPort(c.Addr)
 		s := 100
 		switch c.Type {
 		case "iface":
@@ -650,7 +526,7 @@ func rankCandidates(c []candidate) []candidate {
 		case "turn":
 			s = 20
 		}
-		if ip != nil && ip.To4() == nil {
+		if ap.Addr().Is6() {
 			s -= 2
 		}
 		return s
@@ -674,21 +550,18 @@ func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string,
 	var targets []target
 	targetByAddr := make(map[string]string, len(ordered))
 	for _, c := range ordered {
-		host, _, err := net.SplitHostPort(c.Addr)
+		ap, err := netip.ParseAddrPort(c.Addr)
 		if err != nil {
 			continue
 		}
 		conn := s.V4
-		if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil && ip.To4() == nil {
+		if ap.Addr().Is6() {
 			conn = s.V6
 		}
 		if conn == nil {
 			continue
 		}
-		remote, err := net.ResolveUDPAddr("udp", c.Addr)
-		if err != nil {
-			continue
-		}
+		remote := net.UDPAddrFromAddrPort(ap)
 		targets = append(targets, target{addr: c.Addr, remote: remote, conn: conn})
 		targetByAddr[remote.String()] = c.Addr
 	}
