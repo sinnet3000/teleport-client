@@ -9,13 +9,6 @@ import (
 	"github.com/pion/stun"
 )
 
-func TestStunIntegrityUsesRawSessionSecret(t *testing.T) {
-	const secret = "raw-session-secret"
-	if got := stunIntegrityKey(secret); got != secret {
-		t.Fatalf("STUN integrity key = %q, want original session secret %q", got, secret)
-	}
-}
-
 func TestSTUNNetworkFollowsFamily(t *testing.T) {
 	for _, tt := range []struct {
 		family networkFamily

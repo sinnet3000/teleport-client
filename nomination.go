@@ -533,6 +533,10 @@ func acceptBindingSuccess(probed map[string][][12]byte, addr string, msg *stun.M
 	return false
 }
 
+// fallbackNominationTimeout is how long waitForNomination actively probes candidates
+// before falling back to concurrent probeCandidates.
+const fallbackNominationTimeout = 3 * time.Second
+
 func waitForNomination(ctx context.Context, s *udpSockets, port int, cands []candidate, sessionSecretHash string, local []candidate) endpointSelection {
 	if s == nil {
 		return endpointSelection{}
@@ -568,7 +572,7 @@ func waitForNomination(ctx context.Context, s *udpSockets, port int, cands []can
 	reader.start(s.V6, readLoop)
 	defer reader.Stop()
 
-	done := time.After(12 * time.Second)
+	done := time.After(fallbackNominationTimeout)
 	tick := time.NewTicker(400 * time.Millisecond)
 	defer tick.Stop()
 	ordered := rankCandidates(cands)

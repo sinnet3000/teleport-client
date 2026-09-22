@@ -212,11 +212,13 @@ func apiRequestContext(ctx context.Context, baseURL, method, path, token string,
 	}
 
 	var rdr io.Reader
+	var reqBody []byte
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
+		reqBody = buf
 		rdr = bytes.NewReader(buf)
 	}
 
@@ -238,7 +240,7 @@ func apiRequestContext(ctx context.Context, baseURL, method, path, token string,
 	appLog.Debug("API response", "method", method, "path", path, "status", resp.StatusCode, "duration", time.Since(started).Round(time.Millisecond))
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		knownSecrets := append([]string{token}, collectSensitiveStrings(body)...)
+		knownSecrets := append([]string{token}, collectSensitiveStrings(reqBody)...)
 		debugAPIErrorResponse(appLog, method, path, data, knownSecrets...)
 		return nil, &apiError{StatusCode: resp.StatusCode, err: fmt.Errorf("api %s %s: %s (response body omitted)", method, path, resp.Status)}
 	}
@@ -415,13 +417,26 @@ func redactKnownSecrets(value string, knownSecrets []string) string {
 }
 
 func collectSensitiveStrings(value any) []string {
-	encoded, err := json.Marshal(value)
-	if err != nil {
+	if value == nil {
 		return nil
 	}
 	var decoded any
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		return nil
+	switch v := value.(type) {
+	case []byte:
+		if len(v) == 0 {
+			return nil
+		}
+		if err := json.Unmarshal(v, &decoded); err != nil {
+			return nil
+		}
+	default:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil
+		}
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			return nil
+		}
 	}
 	var secrets []string
 	walkSensitiveValue(decoded, false, func(s string, sensitive bool) {
