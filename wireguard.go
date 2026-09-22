@@ -262,14 +262,14 @@ func discoverPathMTU(endpoint *net.UDPAddr) int {
 		return fallbackMTU
 	}
 
-	conn, err := net.DialUDP("udp", nil, endpoint)
+	udpConn, err := net.DialUDP("udp", nil, endpoint)
 	if err != nil {
 		appLog.Debug("path MTU discovery: dial failed, using fallback", "endpoint", endpoint.String(), "error", err, "mtu", fallbackMTU)
 		return fallbackMTU
 	}
-	defer conn.Close()
+	defer udpConn.Close()
 
-	localIP := conn.LocalAddr().(*net.UDPAddr).IP
+	localIP := udpConn.LocalAddr().(*net.UDPAddr).IP
 
 	ifaces, err := net.Interfaces()
 	if err != nil {

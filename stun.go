@@ -13,13 +13,6 @@ import (
 	"github.com/pion/stun"
 )
 
-func stunRequest() ([]byte, [12]byte) {
-	msg := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
-	var tx [12]byte
-	copy(tx[:], msg.TransactionID[:])
-	return msg.Raw, tx
-}
-
 func parseXorMapped(data []byte) (string, bool) {
 	var msg stun.Message
 	msg.Raw = append(msg.Raw[:0], data...)
@@ -114,7 +107,7 @@ func reflexiveCandidateFromConnWithTimeout(conn *net.UDPConn, ice []iceServer, f
 		}
 		return candidate{}, err
 	}
-	req, _ := stunRequest()
+	req, _ := stunBindingProbe("")
 	// This socket is later handed to WireGuard. Restrict only the STUN read:
 	// SetDeadline would leave a write deadline behind and make all later
 	// WireGuard sends fail once the discovery timeout expires. Clear even the

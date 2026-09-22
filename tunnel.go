@@ -283,12 +283,12 @@ func recoverWireGuardEndpoints(ctx context.Context, dev *device.Device, peerPubH
 				appLog.Warn("automatic endpoint recovery trying candidate", "endpoint", endpoint, "round", round)
 				currentEndpoint = endpoint
 			}
-			if !waitForRecovery(ctx, endpointRecoveryInterval) {
+			if !waitForContext(ctx, endpointRecoveryInterval) {
 				return
 			}
 		}
 		appLog.Warn("automatic endpoint recovery exhausted candidates; retrying", "backoff", backoff.Round(time.Second))
-		if !waitForRecovery(ctx, backoff) {
+		if !waitForContext(ctx, backoff) {
 			return
 		}
 		backoff *= 2
@@ -317,17 +317,6 @@ func buildEndpointRecoveryOrder(current string, known []string) []string {
 		appendEndpoint(endpoint)
 	}
 	return order
-}
-
-func waitForRecovery(ctx context.Context, duration time.Duration) bool {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
 }
 
 // candidateDwell sizes how long a candidate gets before the retry loop moves
