@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 
 	"github.com/things-go/go-socks5"
 	"golang.zx2c4.com/wireguard/tun/netstack"
@@ -104,8 +105,29 @@ func startSocks5Proxy(addr string, tunnelNet *netstack.Net) (*socks5Proxy, error
 			appLog.Error("SOCKS5 proxy stopped", "error", err)
 		}
 	}()
+	if host, _, err := net.SplitHostPort(addr); err == nil && !isLoopbackBindHost(host) {
+		appLog.Warn("SOCKS5 proxy bound to a non-loopback address with no authentication; any client that can reach this listener can use the tunnel",
+			"address", listener.Addr().String())
+	}
 	appLog.Info("SOCKS5 proxy listening", "address", listener.Addr().String(), "transport", "Teleport")
 	return &socks5Proxy{listener: listener, done: done}, nil
+}
+
+// isLoopbackBindHost reports whether a SOCKS5 bind host only accepts local
+// connections. Hosts are matched case-insensitively against "localhost" and
+// IPv6 zone suffixes (e.g. %lo0) are ignored. Unparseable hostnames are
+// treated as non-loopback so a surprising bind still gets the
+// no-authentication warning.
+func isLoopbackBindHost(host string) bool {
+	// Trim the DNS root dot so "localhost." matches like "localhost".
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+		return true
+	}
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func validateSocks5Addr(addr string) error {

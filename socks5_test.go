@@ -14,3 +14,28 @@ func TestValidateSocks5Addr(t *testing.T) {
 		}
 	}
 }
+
+func TestIsLoopbackBindHost(t *testing.T) {
+	for _, tt := range []struct {
+		host string
+		want bool
+	}{
+		{"127.0.0.1", true},
+		{"127.0.0.53", true},
+		{"::1", true},
+		{"localhost", true},
+		{"LocalHost", true},
+		{"localhost.", true},
+		{"::1%lo0", true},
+		{"0.0.0.0", false},
+		{"::", false},
+		{"192.168.1.10", false},
+		{"10.0.0.1", false},
+		{"example.internal", false},
+		{"", false},
+	} {
+		if got := isLoopbackBindHost(tt.host); got != tt.want {
+			t.Fatalf("isLoopbackBindHost(%q) = %v, want %v", tt.host, got, tt.want)
+		}
+	}
+}
