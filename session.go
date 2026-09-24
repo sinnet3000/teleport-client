@@ -77,6 +77,17 @@ func saveSession(path string, s pairedSession) error {
 		return err
 	}
 	committed = true
+	// fsync the directory so the rename itself survives power failure.
+	// Best-effort: some platforms cannot fsync a directory handle, and a
+	// failed durability sync must not fail an already committed save.
+	if d, err := os.Open(dir); err != nil {
+		appLog.Debug("session directory open for fsync failed", "dir", dir, "error", err)
+	} else {
+		if err := d.Sync(); err != nil {
+			appLog.Debug("session directory fsync failed", "dir", dir, "error", err)
+		}
+		_ = d.Close()
+	}
 	return nil
 }
 
