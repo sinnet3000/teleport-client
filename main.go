@@ -273,7 +273,9 @@ func parseFlags() cliFlags {
 	socks5PassValue := *socks5Pass
 	socks5PassSource := "--socks5-pass"
 	envPass := os.Getenv("TELEPORT_SOCKS5_PASS")
-	if envPass != "" && *socks5User == "" {
+	// Warn only when the env password will actually be ignored (no user and
+	// no --socks5-pass); otherwise both-or-neither below aborts usage.
+	if envPass != "" && *socks5User == "" && *socks5Pass == "" {
 		fmt.Fprintf(os.Stderr, "warning: TELEPORT_SOCKS5_PASS is set but --socks5-user is empty; ignoring password (SOCKS5 auth stays disabled)\n")
 	}
 	if socks5PassValue == "" && *socks5User != "" && envPass != "" {
