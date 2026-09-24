@@ -271,11 +271,17 @@ func parseFlags() cliFlags {
 		failUsage("%v", err)
 	}
 	socks5PassValue := *socks5Pass
-	if socks5PassValue == "" {
-		socks5PassValue = os.Getenv("TELEPORT_SOCKS5_PASS")
+	socks5PassSource := "--socks5-pass"
+	if socks5PassValue == "" && *socks5User != "" {
+		// Only consult the environment when a user is configured, so a
+		// stray TELEPORT_SOCKS5_PASS does not break no-auth startups.
+		if envPass := os.Getenv("TELEPORT_SOCKS5_PASS"); envPass != "" {
+			socks5PassValue = envPass
+			socks5PassSource = "TELEPORT_SOCKS5_PASS"
+		}
 	}
 	if (*socks5User == "") != (socks5PassValue == "") {
-		failUsage("--socks5-user and --socks5-pass (or TELEPORT_SOCKS5_PASS) must be set together")
+		failUsage("--socks5-user and --socks5-pass must be set together (password may also come from TELEPORT_SOCKS5_PASS)")
 	}
 	if *socks5User != "" && strings.TrimSpace(*socks5User) == "" {
 		failUsage("--socks5-user cannot be only whitespace")
@@ -286,7 +292,7 @@ func parseFlags() cliFlags {
 		failUsage("--socks5-user must be 255 bytes or fewer (RFC 1929)")
 	}
 	if len(socks5PassValue) > 255 {
-		failUsage("SOCKS5 password must be 255 bytes or fewer (RFC 1929)")
+		failUsage("%s must be 255 bytes or fewer (RFC 1929)", socks5PassSource)
 	}
 	if *forceIPv4 && *forceIPv6 {
 		failUsage("-4 and -6 are mutually exclusive")

@@ -128,7 +128,8 @@ curl --proxy socks5h://alice:secret@127.0.0.1:1080 https://ipinfo.io/json
 ```
 
 `--socks5-pass` is visible in the process list and shell history. Prefer the
-`TELEPORT_SOCKS5_PASS` environment variable instead of the flag:
+`TELEPORT_SOCKS5_PASS` environment variable instead of the flag (it is only
+read when `--socks5-user` is set):
 
 ```sh
 export TELEPORT_SOCKS5_PASS='secret'
@@ -158,9 +159,10 @@ teleport-client -6 --session-file ~/.config/teleport-client/session.json
 - `--socks5 <host:port>`: set the SOCKS5 listen address (default
   `127.0.0.1:1080`).
 - `--socks5-user <name>` / `--socks5-pass <secret>`: require SOCKS5
-  username/password authentication (both required, or omit `--socks5-pass`
-  and set `TELEPORT_SOCKS5_PASS`; default is none). Values are limited to
-  255 bytes (RFC 1929). The password flag is visible in process listings.
+  username/password authentication (both required; the password may come from
+  `TELEPORT_SOCKS5_PASS` when a user is set; default is none). Values are
+  limited to 255 bytes (RFC 1929). The password flag is visible in process
+  listings.
 
 ## Run as a service
 

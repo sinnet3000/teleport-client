@@ -185,6 +185,14 @@ func TestSocks5HandshakeAuthRequired(t *testing.T) {
 		if status := socks5UserPass(t, conn, user, "wrong"); status == socks5AuthOK {
 			t.Fatal("wrong password was accepted")
 		}
+		if _, err := conn.Read(make([]byte, 1)); err == nil {
+			t.Fatal("expected server to close connection after failed auth")
+		} else if err != io.EOF && err != io.ErrUnexpectedEOF {
+			// RST on close is also acceptable teardown after auth failure.
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				t.Fatalf("server kept connection open after failed auth (read timed out)")
+			}
+		}
 	})
 
 	t.Run("correct credentials accepted", func(t *testing.T) {
