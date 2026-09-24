@@ -270,11 +270,23 @@ func parseFlags() cliFlags {
 	if err := validateSocks5Addr(*socks5Addr); err != nil {
 		failUsage("%v", err)
 	}
-	if (*socks5User == "") != (*socks5Pass == "") {
-		failUsage("--socks5-user and --socks5-pass must be set together")
+	socks5PassValue := *socks5Pass
+	if socks5PassValue == "" {
+		socks5PassValue = os.Getenv("TELEPORT_SOCKS5_PASS")
+	}
+	if (*socks5User == "") != (socks5PassValue == "") {
+		failUsage("--socks5-user and --socks5-pass (or TELEPORT_SOCKS5_PASS) must be set together")
 	}
 	if *socks5User != "" && strings.TrimSpace(*socks5User) == "" {
 		failUsage("--socks5-user cannot be only whitespace")
+	}
+	// RFC 1929 ULEN/PLEN are single octets; longer credentials can never
+	// complete a UserPass handshake.
+	if len(*socks5User) > 255 {
+		failUsage("--socks5-user must be 255 bytes or fewer (RFC 1929)")
+	}
+	if len(socks5PassValue) > 255 {
+		failUsage("SOCKS5 password must be 255 bytes or fewer (RFC 1929)")
 	}
 	if *forceIPv4 && *forceIPv6 {
 		failUsage("-4 and -6 are mutually exclusive")
@@ -330,7 +342,7 @@ func parseFlags() cliFlags {
 		printConfig:      *printConfig,
 		socks5Addr:       *socks5Addr,
 		socks5User:       *socks5User,
-		socks5Pass:       *socks5Pass,
+		socks5Pass:       socks5PassValue,
 		family:           family,
 		debug:            *debug,
 		sessionFile:      *sessionFile,

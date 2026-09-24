@@ -127,8 +127,17 @@ teleport-client --invite <uuid> --socks5 0.0.0.0:1080 \
 curl --proxy socks5h://alice:secret@127.0.0.1:1080 https://ipinfo.io/json
 ```
 
+`--socks5-pass` is visible in the process list and shell history. Prefer the
+`TELEPORT_SOCKS5_PASS` environment variable instead of the flag:
+
+```sh
+export TELEPORT_SOCKS5_PASS='secret'
+teleport-client --invite <uuid> --socks5 0.0.0.0:1080 --socks5-user alice
+```
+
 When credentials are set, only username/password is accepted (NoAuth is not
-offered). SOCKS UDP ASSOCIATE is not implemented.
+offered). User names and passwords are limited to 255 bytes each (RFC 1929).
+SOCKS UDP ASSOCIATE is not implemented.
 
 ## Address family
 
@@ -149,7 +158,9 @@ teleport-client -6 --session-file ~/.config/teleport-client/session.json
 - `--socks5 <host:port>`: set the SOCKS5 listen address (default
   `127.0.0.1:1080`).
 - `--socks5-user <name>` / `--socks5-pass <secret>`: require SOCKS5
-  username/password authentication (both required; default is none).
+  username/password authentication (both required, or omit `--socks5-pass`
+  and set `TELEPORT_SOCKS5_PASS`; default is none). Values are limited to
+  255 bytes (RFC 1929). The password flag is visible in process listings.
 
 ## Run as a service
 

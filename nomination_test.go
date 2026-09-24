@@ -253,9 +253,15 @@ func TestProbeCandidatesLatencyWhenFirstCandidateUnresponsive(t *testing.T) {
 
 	go func() {
 		for {
-			if err := replyStunBinding(peer, secret, 2*time.Second); err != nil {
+			raw, remote, err := readUDP(peer, 2*time.Second)
+			if err != nil {
 				return
 			}
+			msg, err := parseAuthenticatedBindingRequest(raw, secret)
+			if err != nil {
+				continue
+			}
+			_, _ = peer.WriteToUDP(stunBindingSuccess(msg, secret), remote)
 		}
 	}()
 

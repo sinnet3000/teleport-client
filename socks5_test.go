@@ -1,9 +1,20 @@
 package main
 
 import (
+	"io"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/things-go/go-socks5"
+)
+
+const (
+	socks5Ver            = 0x05
+	socks5MethodNoAuth   = 0x00
+	socks5MethodUserPass = 0x02
+	socks5MethodNone     = 0xFF
+	socks5AuthOK         = 0x00
 )
 
 func TestValidateSocks5Addr(t *testing.T) {
@@ -85,5 +96,111 @@ func TestSocks5AuthMethods(t *testing.T) {
 	}
 	if up.Credentials.Valid("bob", "secret", "") {
 		t.Fatal("credentials should reject unknown user")
+	}
+}
+
+// socks5Greet sends a method-selection greeting offering methods and returns
+// the server's chosen method code (0xFF when none are acceptable).
+func socks5Greet(t *testing.T, conn net.Conn, methods ...byte) byte {
+	t.Helper()
+	req := append([]byte{socks5Ver, byte(len(methods))}, methods...)
+	if _, err := conn.Write(req); err != nil {
+		t.Fatalf("write SOCKS5 greeting: %v", err)
+	}
+	resp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		t.Fatalf("read SOCKS5 method selection: %v", err)
+	}
+	if resp[0] != socks5Ver {
+		t.Fatalf("SOCKS version = %#x, want %#x", resp[0], socks5Ver)
+	}
+	return resp[1]
+}
+
+// socks5UserPass performs the RFC 1929 sub-negotiation and returns the
+// status byte (0 means success).
+func socks5UserPass(t *testing.T, conn net.Conn, user, pass string) byte {
+	t.Helper()
+	if len(user) > 255 || len(pass) > 255 {
+		t.Fatal("test credentials exceed RFC 1929 limits")
+	}
+	req := []byte{0x01, byte(len(user))}
+	req = append(req, user...)
+	req = append(req, byte(len(pass)))
+	req = append(req, pass...)
+	if _, err := conn.Write(req); err != nil {
+		t.Fatalf("write SOCKS5 userpass: %v", err)
+	}
+	resp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		t.Fatalf("read SOCKS5 userpass reply: %v", err)
+	}
+	if resp[0] != 0x01 {
+		t.Fatalf("userpass version = %#x, want 0x01", resp[0])
+	}
+	return resp[1]
+}
+
+// startTestSocks5Server serves socks5AuthMethods(auth) on a loopback TCP
+// listener without requiring a tunnel netstack (auth happens before CONNECT).
+func startTestSocks5Server(t *testing.T, auth socks5Auth) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	server := socks5.NewServer(socks5.WithAuthMethods(socks5AuthMethods(auth)))
+	go func() { _ = server.Serve(ln) }()
+	return ln.Addr().String()
+}
+
+func dialTestSocks5(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial SOCKS5: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	return conn
+}
+
+func TestSocks5HandshakeAuthRequired(t *testing.T) {
+	const user, pass = "alice", "secret"
+	auth := socks5Auth{user: user, pass: pass}
+
+	t.Run("NoAuth-only client rejected", func(t *testing.T) {
+		conn := dialTestSocks5(t, startTestSocks5Server(t, auth))
+		if method := socks5Greet(t, conn, socks5MethodNoAuth); method != socks5MethodNone {
+			t.Fatalf("selected method = %#x, want %#x (no acceptable methods)", method, socks5MethodNone)
+		}
+	})
+
+	t.Run("wrong password rejected", func(t *testing.T) {
+		conn := dialTestSocks5(t, startTestSocks5Server(t, auth))
+		if method := socks5Greet(t, conn, socks5MethodUserPass); method != socks5MethodUserPass {
+			t.Fatalf("selected method = %#x, want %#x", method, socks5MethodUserPass)
+		}
+		if status := socks5UserPass(t, conn, user, "wrong"); status == socks5AuthOK {
+			t.Fatal("wrong password was accepted")
+		}
+	})
+
+	t.Run("correct credentials accepted", func(t *testing.T) {
+		conn := dialTestSocks5(t, startTestSocks5Server(t, auth))
+		if method := socks5Greet(t, conn, socks5MethodUserPass); method != socks5MethodUserPass {
+			t.Fatalf("selected method = %#x, want %#x", method, socks5MethodUserPass)
+		}
+		if status := socks5UserPass(t, conn, user, pass); status != socks5AuthOK {
+			t.Fatalf("auth status = %#x, want %#x", status, socks5AuthOK)
+		}
+	})
+}
+
+func TestSocks5HandshakeNoAuth(t *testing.T) {
+	conn := dialTestSocks5(t, startTestSocks5Server(t, socks5Auth{}))
+	if method := socks5Greet(t, conn, socks5MethodNoAuth); method != socks5MethodNoAuth {
+		t.Fatalf("selected method = %#x, want %#x", method, socks5MethodNoAuth)
 	}
 }
