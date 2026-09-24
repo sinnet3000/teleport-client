@@ -270,17 +270,13 @@ func apiRequestFunc(ctx context.Context) func(method, path, token string, body i
 
 // pollForResponseWithContext polls GET /<requestID> every interval, up to
 // maxTries times, until a poll's response_type equals want. It returns nil,
-// nil if want never arrived within maxTries. onTick, if non-nil, runs once
-// per iteration before the poll request, for callers that need to check
-// other channels while waiting. request is injected so tests can stub it.
-func pollForResponseWithContext(ctx context.Context, request func(method, path, token string, body interface{}) (*apiResponse, error), token, requestID, want string, interval time.Duration, maxTries int, onTick func()) (*apiResponse, error) {
+// nil if want never arrived within maxTries. request is injected so tests can
+// stub it.
+func pollForResponseWithContext(ctx context.Context, request func(method, path, token string, body interface{}) (*apiResponse, error), token, requestID, want string, interval time.Duration, maxTries int) (*apiResponse, error) {
 	consecutiveErrors := 0
 	for i := 0; i < maxTries; i++ {
 		if !waitForContext(ctx, interval) {
 			return nil, ctx.Err()
-		}
-		if onTick != nil {
-			onTick()
 		}
 		poll, err := request("GET", "/"+requestID, token, nil)
 		if err != nil {

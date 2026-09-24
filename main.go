@@ -139,7 +139,7 @@ func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionR
 		defer early.Stop()
 	}
 
-	connResp, err := connectAndAwaitResponse(ctx, *session, flags.name, pub, stunSecret, local, ice, early)
+	connResp, err := connectAndAwaitResponse(ctx, *session, flags.name, pub, stunSecret, local, ice)
 	if err != nil {
 		return connectionAttemptResult{}, err
 	}
@@ -356,7 +356,7 @@ func establishSession(ctx context.Context, flags cliFlags) (sessionResult, error
 		return sessionResult{}, err
 	}
 
-	poll, err := pollForResponseWithContext(ctx, apiRequestFunc(ctx), token, access.TeleportRequestID, "ACCESS_GRANTED", 2*time.Second, 60, nil)
+	poll, err := pollForResponseWithContext(ctx, apiRequestFunc(ctx), token, access.TeleportRequestID, "ACCESS_GRANTED", 2*time.Second, 60)
 	if err != nil {
 		return sessionResult{}, err
 	}
@@ -400,7 +400,7 @@ func fetchICEConfiguration(ctx context.Context, sessionToken, sessionSecret stri
 		return nil, err
 	}
 
-	poll, err := pollForResponseWithContext(ctx, apiRequestFunc(ctx), sessionToken, iceReq.TeleportRequestID, "ICE_CONFIGURATION", responsePollInterval, 100, nil)
+	poll, err := pollForResponseWithContext(ctx, apiRequestFunc(ctx), sessionToken, iceReq.TeleportRequestID, "ICE_CONFIGURATION", responsePollInterval, 100)
 	if err != nil {
 		return nil, err
 	}
@@ -448,7 +448,7 @@ func gatherLocalCandidates(sockets *udpSockets, port int, family networkFamily, 
 
 // connectAndAwaitResponse sends CONNECT with the gathered candidates and
 // polls for CONNECT_RESPONSE.
-func connectAndAwaitResponse(ctx context.Context, session sessionResult, name, pub, stunSecret string, local []candidate, ice []iceServer, early *earlyNominationListener) (*apiResponse, error) {
+func connectAndAwaitResponse(ctx context.Context, session sessionResult, name, pub, stunSecret string, local []candidate, ice []iceServer) (*apiResponse, error) {
 	connectPayload := map[string]interface{}{
 		"request_type": "CONNECT",
 		"secret":       session.Secret,
@@ -464,19 +464,7 @@ func connectAndAwaitResponse(ctx context.Context, session sessionResult, name, p
 		return nil, err
 	}
 
-	connResp, err := pollForResponseWithContext(ctx, apiRequestFunc(ctx), session.Token, connectReq.TeleportRequestID, "CONNECT_RESPONSE", responsePollInterval, 200, func() {
-		if early == nil {
-			return
-		}
-		select {
-		case nom := <-early.hints:
-			// The real endpoint/mode is recovered from early.Logs() below once
-			// CONNECT_RESPONSE arrives; this just surfaces early nomination
-			// for visibility while the CONNECT poll loop keeps running.
-			appLog.Debug("early nomination observed", "endpoint", nom.Endpoint, "mode", nom.Mode)
-		default:
-		}
-	})
+	connResp, err := pollForResponseWithContext(ctx, apiRequestFunc(ctx), session.Token, connectReq.TeleportRequestID, "CONNECT_RESPONSE", responsePollInterval, 200)
 	if err != nil {
 		return nil, err
 	}

@@ -161,7 +161,7 @@ func TestPollForResponseRetriesTransientThenSucceeds(t *testing.T) {
 		return &apiResponse{ResponseType: "READY"}, nil
 	}
 
-	poll, err := pollForResponseWithContext(context.Background(), request, "token", "req", "READY", time.Millisecond, 10, nil)
+	poll, err := pollForResponseWithContext(context.Background(), request, "token", "req", "READY", time.Millisecond, 10)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestPollForResponseFailsFastOnPermanentError(t *testing.T) {
 		return nil, &apiError{StatusCode: http.StatusUnauthorized, err: fmt.Errorf("unauthorized")}
 	}
 
-	_, err := pollForResponseWithContext(context.Background(), request, "token", "req", "READY", time.Millisecond, 10, nil)
+	_, err := pollForResponseWithContext(context.Background(), request, "token", "req", "READY", time.Millisecond, 10)
 	if err == nil {
 		t.Fatal("expected permanent error to be returned")
 	}
@@ -196,7 +196,7 @@ func TestPollForResponseGivesUpAfterConsecutiveTransientErrors(t *testing.T) {
 		return nil, &apiError{StatusCode: http.StatusServiceUnavailable, err: fmt.Errorf("unavailable")}
 	}
 
-	_, err := pollForResponseWithContext(context.Background(), request, "token", "req", "READY", time.Millisecond, 100, nil)
+	_, err := pollForResponseWithContext(context.Background(), request, "token", "req", "READY", time.Millisecond, 100)
 	if err == nil {
 		t.Fatal("expected error after exceeding consecutive transient failures")
 	}
@@ -215,7 +215,7 @@ func TestPollForResponseStopsWhileWaitingWhenCanceled(t *testing.T) {
 	}
 
 	started := time.Now()
-	_, err := pollForResponseWithContext(ctx, request, "token", "req", "READY", time.Minute, 10, nil)
+	_, err := pollForResponseWithContext(ctx, request, "token", "req", "READY", time.Minute, 10)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("poll cancellation error = %v, want context.Canceled", err)
 	}

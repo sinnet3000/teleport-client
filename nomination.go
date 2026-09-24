@@ -383,14 +383,6 @@ func (u *udpReadStopper) Stop() {
 	})
 }
 
-// nominationHint is an early, unverified signal that a candidate address may
-// be the one the console eventually nominates; the caller confirms the real
-// endpoint from earlyNominationListener.Logs() once CONNECT_RESPONSE arrives.
-type nominationHint struct {
-	Endpoint string
-	Mode     string
-}
-
 // earlyNominationListener answers the console's authenticated STUN Binding
 // Requests as soon as they arrive on the outer UDP sockets, which may be well
 // before CONNECT_RESPONSE: the console can complete its nomination wait
@@ -399,8 +391,6 @@ type earlyNominationListener struct {
 	sockets    *udpSockets
 	stunSecret string
 	nomination *nominationTracker
-
-	hints chan nominationHint
 
 	mu   sync.Mutex
 	logs []packetLog
@@ -415,7 +405,6 @@ func newEarlyNominationListener(sockets *udpSockets, stunSecret string, nominati
 		sockets:    sockets,
 		stunSecret: stunSecret,
 		nomination: nomination,
-		hints:      make(chan nominationHint, 1),
 		stop:       newUDPReadStopper(sockets),
 	}
 }
@@ -470,10 +459,6 @@ func (l *earlyNominationListener) readLoop(conn *net.UDPConn, done <-chan struct
 		}
 		if resp != nil {
 			l.appendLog(logPacket("out", addr, resp))
-		}
-		select {
-		case l.hints <- nominationHint{Endpoint: addr.String(), Mode: "inbound_binding_request"}:
-		default:
 		}
 	}
 }
