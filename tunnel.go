@@ -123,10 +123,6 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 		workerWG.Wait()
 	}()
 
-	mask := p.connResp.ServerInfo.TunnelMask
-	if mask == 0 {
-		mask = 120
-	}
 	ipc := fmt.Sprintf("private_key=%s\nlisten_port=%d\npublic_key=%s\nendpoint=%s\npersistent_keepalive_interval=25\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\n",
 		privHex, p.port, peerPubHex, epStr)
 	if err := dev.IpcSet(ipc); err != nil {
@@ -137,13 +133,11 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 	}
 	appLog.Debug("WireGuard device started", "endpoint", p.endpoint)
 	renegotiate := make(chan struct{}, 1)
-	if len(p.candidateQueue) > 0 || p.nomination != nil {
-		workerWG.Add(1)
-		go func() {
-			defer workerWG.Done()
-			retryEndpointOnHandshakeTimeout(lifecycleCtx, dev, peerPubHex, p.endpoint, p.candidateQueue, p.candidateTypes, p.nomination, p.sockets, p.stunSecret, renegotiate)
-		}()
-	}
+	workerWG.Add(1)
+	go func() {
+		defer workerWG.Done()
+		retryEndpointOnHandshakeTimeout(lifecycleCtx, dev, peerPubHex, p.endpoint, p.candidateQueue, p.candidateTypes, p.nomination, p.sockets, p.stunSecret, renegotiate)
+	}()
 	echoStopped := make(chan error, 1)
 	healthEvents := make(chan udpEchoHealthEvent)
 	workerWG.Add(1)
@@ -430,9 +424,6 @@ func forceHandshakeInitiation(dev *device.Device, peerPubHex string) {
 }
 
 func signalEndpointExhaustion(ctx context.Context, exhausted chan<- struct{}) {
-	if exhausted == nil {
-		return
-	}
 	select {
 	case exhausted <- struct{}{}:
 	case <-ctx.Done():

@@ -93,7 +93,6 @@ func (s *udpSockets) Close() {
 type stunBind struct {
 	conn4      *net.UDPConn
 	conn6      *net.UDPConn
-	port       uint16
 	stunSecret string
 	mu         sync.Mutex
 	done       chan struct{}
@@ -104,7 +103,6 @@ type stunBind struct {
 }
 
 func (b *stunBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
-	b.port = port
 	// Fresh lifecycle for this Open; also clear any read deadline a prior
 	// Close set so the receive loops can read again after a rebind.
 	b.mu.Lock()

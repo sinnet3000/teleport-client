@@ -152,7 +152,7 @@ func runUDPEchoPinger(ctx context.Context, tunnelNet *netstack.Net, secret strin
 		}
 
 		event, firstSuccess := health.observe(matched)
-		if event != 0 && healthEvents != nil {
+		if event != 0 {
 			select {
 			case healthEvents <- event:
 			case <-ctx.Done():

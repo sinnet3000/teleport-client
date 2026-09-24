@@ -599,7 +599,7 @@ func probeCandidates(s *udpSockets, cands []candidate, sessionSecret string, loc
 	var graceTimer *time.Timer
 	var graceCh <-chan time.Time
 	selectBest := func() (string, bool) {
-		if bestRank >= 0 && bestRank < len(targets) {
+		if bestRank >= 0 {
 			return targets[bestRank].addr, true
 		}
 		return "", false

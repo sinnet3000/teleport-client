@@ -40,7 +40,6 @@ type apiResponse struct {
 	ConnectionState   any         `json:"connectionStateData"`
 	Metadata          any         `json:"metadata"`
 	StatusCode        int         `json:"status_code,omitempty"`
-	Raw               interface{} `json:"-"`
 }
 
 type iceServer struct {
@@ -137,10 +136,6 @@ func normalizeInviteSecret(value string) (string, error) {
 		}
 	}
 	return strings.ToLower(value), nil
-}
-
-func fetchMetadata(token string) (*metadataResponse, error) {
-	return fetchMetadataContext(context.Background(), token)
 }
 
 func fetchMetadataContext(ctx context.Context, token string) (*metadataResponse, error) {
@@ -251,9 +246,6 @@ func apiRequestContext(ctx context.Context, baseURL, method, path, token string,
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, err
 	}
-	var raw interface{}
-	_ = json.Unmarshal(data, &raw)
-	out.Raw = raw
 	appLog.Debug("API response decoded", "method", method, "path", path, "response_type", out.ResponseType)
 	return &out, nil
 }
