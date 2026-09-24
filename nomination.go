@@ -582,35 +582,23 @@ func probeCandidates(s *udpSockets, cands []candidate, sessionSecret string, loc
 		remote *net.UDPAddr
 	}
 	responses := make(chan responsePacket, len(targets)+4)
+	readResponses := func(conn *net.UDPConn, done <-chan struct{}) {
+		buf := make([]byte, 1500)
+		for {
+			_, addr, ok := readUDPPacket(conn, done, buf)
+			if !ok {
+				return
+			}
+			select {
+			case responses <- responsePacket{remote: addr}:
+			case <-done:
+				return
+			}
+		}
+	}
 	reader := newUDPReadStopper(s)
-	reader.start(s.V4, func(conn *net.UDPConn, done <-chan struct{}) {
-		buf := make([]byte, 1500)
-		for {
-			_, addr, ok := readUDPPacket(conn, done, buf)
-			if !ok {
-				return
-			}
-			select {
-			case responses <- responsePacket{remote: addr}:
-			case <-done:
-				return
-			}
-		}
-	})
-	reader.start(s.V6, func(conn *net.UDPConn, done <-chan struct{}) {
-		buf := make([]byte, 1500)
-		for {
-			_, addr, ok := readUDPPacket(conn, done, buf)
-			if !ok {
-				return
-			}
-			select {
-			case responses <- responsePacket{remote: addr}:
-			case <-done:
-				return
-			}
-		}
-	})
+	reader.start(s.V4, readResponses)
+	reader.start(s.V6, readResponses)
 	defer reader.Stop()
 
 	for _, t := range targets {
@@ -625,6 +613,12 @@ func probeCandidates(s *udpSockets, cands []candidate, sessionSecret string, loc
 	bestRank := -1
 	var graceTimer *time.Timer
 	var graceCh <-chan time.Time
+	selectBest := func() (string, bool) {
+		if bestRank >= 0 && bestRank < len(targets) {
+			return targets[bestRank].addr, true
+		}
+		return "", false
+	}
 
 	for {
 		select {
@@ -647,14 +641,12 @@ func probeCandidates(s *udpSockets, cands []candidate, sessionSecret string, loc
 				}
 			}
 		case <-graceCh:
-			if bestRank >= 0 && bestRank < len(targets) {
-				selected := targets[bestRank].addr
+			if selected, ok := selectBest(); ok {
 				appLog.Debug("fallback probe result after grace period", "candidate", selected, "matched", true, "rank", bestRank)
 				return selected
 			}
 		case <-timer.C:
-			if bestRank >= 0 && bestRank < len(targets) {
-				selected := targets[bestRank].addr
+			if selected, ok := selectBest(); ok {
 				appLog.Debug("fallback probe result", "candidate", selected, "matched", true, "rank", bestRank)
 				return selected
 			}
