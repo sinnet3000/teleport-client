@@ -33,6 +33,8 @@ type cliFlags struct {
 	forceTurn        bool
 	printConfig      bool
 	socks5Addr       string
+	socks5User       string
+	socks5Pass       string
 	family           networkFamily
 	debug            bool
 	sessionFile      string
@@ -182,6 +184,7 @@ func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionR
 		sockets:        sockets,
 		nomination:     nomination,
 		socks5Addr:     flags.socks5Addr,
+		socks5Auth:     socks5Auth{user: flags.socks5User, pass: flags.socks5Pass},
 		debug:          flags.debug,
 		candidateQueue: candidateQueue,
 		candidateTypes: candidateTypes,
@@ -232,6 +235,8 @@ func parseFlags() cliFlags {
 	forceTurn := flag.Bool("turn", false, "require and use a console TURN relay while retaining STUN discovery")
 	printConfig := flag.Bool("print-config", false, "print the WireGuard configuration and exit")
 	socks5Addr := flag.String("socks5", "127.0.0.1:1080", "set the SOCKS5 listen address")
+	socks5User := flag.String("socks5-user", "", "SOCKS5 username (requires --socks5-pass; default is no authentication)")
+	socks5Pass := flag.String("socks5-pass", "", "SOCKS5 password (requires --socks5-user)")
 	forceIPv4 := flag.Bool("4", false, "use IPv4 only")
 	forceIPv6 := flag.Bool("6", false, "use IPv6 only")
 	debug := flag.Bool("debug", false, "enable debug logging")
@@ -264,6 +269,12 @@ func parseFlags() cliFlags {
 	}
 	if err := validateSocks5Addr(*socks5Addr); err != nil {
 		failUsage("%v", err)
+	}
+	if (*socks5User == "") != (*socks5Pass == "") {
+		failUsage("--socks5-user and --socks5-pass must be set together")
+	}
+	if *socks5User != "" && strings.TrimSpace(*socks5User) == "" {
+		failUsage("--socks5-user cannot be only whitespace")
 	}
 	if *forceIPv4 && *forceIPv6 {
 		failUsage("-4 and -6 are mutually exclusive")
@@ -318,6 +329,8 @@ func parseFlags() cliFlags {
 		forceTurn:        *forceTurn,
 		printConfig:      *printConfig,
 		socks5Addr:       *socks5Addr,
+		socks5User:       *socks5User,
+		socks5Pass:       *socks5Pass,
 		family:           family,
 		debug:            *debug,
 		sessionFile:      *sessionFile,

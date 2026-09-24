@@ -116,8 +116,19 @@ curl --proxy socks5h://127.0.0.1:1080 https://ipinfo.io/json
 curl --proxy socks5h://127.0.0.1:1080 https://example.com
 ```
 
-The proxy has no authentication. Binding it to a non-loopback address exposes
-it to other hosts on that network. SOCKS UDP ASSOCIATE is not implemented.
+The proxy defaults to loopback with no authentication. Binding it to a
+non-loopback address without credentials exposes it to other hosts on that
+network. To require username/password auth (SOCKS5 method 0x02), pass both
+flags:
+
+```sh
+teleport-client --invite <uuid> --socks5 0.0.0.0:1080 \
+  --socks5-user alice --socks5-pass 'secret'
+curl --proxy socks5h://alice:secret@127.0.0.1:1080 https://ipinfo.io/json
+```
+
+When credentials are set, only username/password is accepted (NoAuth is not
+offered). SOCKS UDP ASSOCIATE is not implemented.
 
 ## Address family
 
@@ -137,6 +148,8 @@ teleport-client -6 --session-file ~/.config/teleport-client/session.json
 - `--print-config`: print the WireGuard configuration and exit.
 - `--socks5 <host:port>`: set the SOCKS5 listen address (default
   `127.0.0.1:1080`).
+- `--socks5-user <name>` / `--socks5-pass <secret>`: require SOCKS5
+  username/password authentication (both required; default is none).
 
 ## Run as a service
 

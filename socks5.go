@@ -30,6 +30,26 @@ type socks5Proxy struct {
 	done     chan struct{}
 }
 
+// socks5Auth is optional username/password authentication for the local
+// SOCKS5 proxy. Zero value means NoAuth (the default).
+type socks5Auth struct {
+	user string
+	pass string
+}
+
+func (a socks5Auth) enabled() bool {
+	return a.user != ""
+}
+
+func socks5AuthMethods(auth socks5Auth) []socks5.Authenticator {
+	if auth.enabled() {
+		return []socks5.Authenticator{socks5.UserPassAuthenticator{
+			Credentials: socks5.StaticCredentials{auth.user: auth.pass},
+		}}
+	}
+	return []socks5.Authenticator{socks5.NoAuthAuthenticator{}}
+}
+
 func (p *socks5Proxy) Close() error {
 	if p == nil || p.listener == nil {
 		return nil
@@ -66,7 +86,7 @@ func (r tunnelSocksResolver) Resolve(ctx context.Context, name string) (context.
 	return ctx, nil, fmt.Errorf("no IPv4 address found for %q", name)
 }
 
-func startSocks5Proxy(addr string, tunnelNet *netstack.Net) (*socks5Proxy, error) {
+func startSocks5Proxy(addr string, auth socks5Auth, tunnelNet *netstack.Net) (*socks5Proxy, error) {
 	if tunnelNet == nil {
 		return nil, errors.New("SOCKS5 proxy requires a Teleport netstack")
 	}
@@ -96,7 +116,7 @@ func startSocks5Proxy(addr string, tunnelNet *netstack.Net) (*socks5Proxy, error
 			return &loggedSocksConn{Conn: conn, network: network, target: target}, nil
 		}),
 		socks5.WithResolver(tunnelSocksResolver{net: tunnelNet}),
-		socks5.WithAuthMethods([]socks5.Authenticator{socks5.NoAuthAuthenticator{}}),
+		socks5.WithAuthMethods(socks5AuthMethods(auth)),
 	)
 	done := make(chan struct{})
 	go func() {
@@ -105,12 +125,21 @@ func startSocks5Proxy(addr string, tunnelNet *netstack.Net) (*socks5Proxy, error
 			appLog.Error("SOCKS5 proxy stopped", "error", err)
 		}
 	}()
-	if host, _, err := net.SplitHostPort(addr); err == nil && !isLoopbackBindHost(host) {
-		appLog.Warn("SOCKS5 proxy bound to a non-loopback address with no authentication; any client that can reach this listener can use the tunnel",
-			"address", listener.Addr().String())
+	if !auth.enabled() {
+		if host, _, err := net.SplitHostPort(addr); err == nil && !isLoopbackBindHost(host) {
+			appLog.Warn("SOCKS5 proxy bound to a non-loopback address with no authentication; any client that can reach this listener can use the tunnel",
+				"address", listener.Addr().String())
+		}
 	}
-	appLog.Info("SOCKS5 proxy listening", "address", listener.Addr().String(), "transport", "Teleport")
+	appLog.Info("SOCKS5 proxy listening", "address", listener.Addr().String(), "transport", "Teleport", "auth", authLogMode(auth))
 	return &socks5Proxy{listener: listener, done: done}, nil
+}
+
+func authLogMode(auth socks5Auth) string {
+	if auth.enabled() {
+		return "userpass"
+	}
+	return "none"
 }
 
 // isLoopbackBindHost reports whether a SOCKS5 bind host only accepts local

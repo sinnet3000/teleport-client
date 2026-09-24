@@ -26,6 +26,7 @@ type tunnelParams struct {
 	sockets        *udpSockets
 	nomination     *nominationTracker
 	socks5Addr     string
+	socks5Auth     socks5Auth
 	debug          bool
 	candidateQueue []string
 	candidateTypes map[string]string
@@ -147,7 +148,7 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 			echoStopped <- err
 		}
 	}()
-	proxy, err := startSocks5Proxy(p.socks5Addr, tunnelNet)
+	proxy, err := startSocks5Proxy(p.socks5Addr, p.socks5Auth, tunnelNet)
 	if err != nil {
 		return err
 	}
