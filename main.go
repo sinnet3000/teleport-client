@@ -382,8 +382,6 @@ func establishSession(ctx context.Context, flags cliFlags) (sessionResult, error
 		if err := saveSession(flags.sessionFile, pairedSession{
 			SessionToken:  sessionToken,
 			SessionSecret: sessionSecret,
-			ClientID:      clientID,
-			InviteSecret:  flags.invite,
 			SavedAt:       time.Now(),
 		}); err != nil {
 			appLog.Warn("failed to save session", "path", flags.sessionFile, "error", err)
