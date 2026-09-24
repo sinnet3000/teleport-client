@@ -415,8 +415,8 @@ func newEarlyNominationListener(sockets *udpSockets, stunSecret string, nominati
 		sockets:    sockets,
 		stunSecret: stunSecret,
 		nomination: nomination,
-		hints:          make(chan nominationHint, 1),
-		stop:           newUDPReadStopper(sockets),
+		hints:      make(chan nominationHint, 1),
+		stop:       newUDPReadStopper(sockets),
 	}
 }
 

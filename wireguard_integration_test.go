@@ -38,20 +38,12 @@ func genKey(t *testing.T, seed byte) (string, string) {
 // offline against wireguard-go and real UDP sockets.
 func TestIpcSetReachesPeer(t *testing.T) {
 	// Fake "console" UDP peer on loopback so Send has a destination we can watch.
-	peerConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer peerConn.Close()
+	peerConn := loopbackUDP(t)
 	peerPort := peerConn.LocalAddr().(*net.UDPAddr).Port
 	endpoint := fmt.Sprintf("127.0.0.1:%d", peerPort)
 
 	// Use one UDP socket for both STUN and WireGuard, as production does.
-	ourConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ourConn.Close()
+	ourConn := loopbackUDP(t)
 	ourPort := ourConn.LocalAddr().(*net.UDPAddr).Port
 
 	// Create the userspace TUN used by production.
@@ -98,19 +90,17 @@ func TestIpcSetReachesPeer(t *testing.T) {
 
 	// Watch the fake peer socket for an incoming WireGuard handshake initiation
 	// (type 1, 148 bytes) sent from our STUN port.
-	peerConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	buf := make([]byte, 2048)
-	n, from, err := peerConn.ReadFromUDP(buf)
+	buf, from, err := readUDP(peerConn, 3*time.Second)
 	if err != nil {
 		t.Fatalf("NO PACKET received by peer within timeout (handshake not sent): %v", err)
 	}
 	t.Logf("peer received %d bytes from %s (our STUN port=%d), first byte=0x%02x",
-		n, from.String(), ourPort, buf[0])
+		len(buf), from.String(), ourPort, buf[0])
 	if from.Port != ourPort {
 		t.Errorf("packet came from port %d, expected STUN port %d", from.Port, ourPort)
 	}
-	if n != 148 || buf[0] != 0x01 {
-		t.Fatalf("received a packet, but not a 148-byte type-1 handshake initiation (n=%d type=0x%02x)", n, buf[0])
+	if len(buf) != 148 || buf[0] != 0x01 {
+		t.Fatalf("received a packet, but not a 148-byte type-1 handshake initiation (n=%d type=0x%02x)", len(buf), buf[0])
 	}
 	t.Log("got a WireGuard handshake initiation from the STUN port")
 
@@ -119,13 +109,8 @@ func TestIpcSetReachesPeer(t *testing.T) {
 	// the fix this hung until the test timeout.
 	closed := make(chan struct{})
 	go func() { dev.Close(); close(closed) }()
-	select {
-	case <-closed:
-		t.Log("dev.Close() returned cleanly (no stopping.Wait() deadlock)")
-	case <-time.After(5 * time.Second):
-		t.Fatal("dev.Close() DEADLOCKED — stunBind.Close() did not unblock the receive routine")
-	}
-	ourConn.Close()
+	waitChan(t, closed, 5*time.Second)
+	t.Log("dev.Close() returned cleanly (no stopping.Wait() deadlock)")
 }
 
 // TestOwnKeyRoundTrip verifies that wgKeypair's public key matches the key

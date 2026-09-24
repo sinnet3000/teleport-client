@@ -68,26 +68,17 @@ func TestValidateTurnPrerequisitesPreservesReflexCandidate(t *testing.T) {
 }
 
 func TestReflexiveDiscoveryClearsReadDeadline(t *testing.T) {
-	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer server.Close()
-	client, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
+	server := loopbackUDP(t)
+	client := loopbackUDP(t)
 
 	serverErr := make(chan error, 1)
 	go func() {
-		buf := make([]byte, 1500)
-		n, peer, err := server.ReadFromUDP(buf)
+		buf, peer, err := readUDP(server, 5*time.Second)
 		if err != nil {
 			serverErr <- err
 			return
 		}
-		request, ok := parseStunMessage(buf[:n])
+		request, ok := parseStunMessage(buf)
 		if !ok {
 			serverErr <- errors.New("test server received invalid STUN request")
 			return
@@ -122,12 +113,7 @@ func TestReflexiveDiscoveryClearsReadDeadline(t *testing.T) {
 		_, _, err := client.ReadFromUDP(buf)
 		readResult <- err
 	}()
-	select {
-	case err := <-readResult:
-		if err != nil {
-			t.Fatalf("socket retained discovery read deadline: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for post-discovery nomination packet")
+	if err := waitChan(t, readResult, time.Second); err != nil {
+		t.Fatalf("socket retained discovery read deadline: %v", err)
 	}
 }

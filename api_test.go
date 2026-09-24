@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -56,8 +55,8 @@ func TestDebugAPIErrorResponseRedactsCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var output bytes.Buffer
-	debugAPIErrorResponse(newAppLogger(&output, true), "POST", "/", response, knownSecrets...)
+	logger, output := testLogger(t, true)
+	debugAPIErrorResponse(logger, "POST", "/", response, knownSecrets...)
 	got := output.String()
 	for _, forbidden := range []string{token, secret, nestedSecret, "new-server-credential", "another-server-secret", "must not be logged"} {
 		if strings.Contains(got, forbidden) {
@@ -71,8 +70,8 @@ func TestDebugAPIErrorResponseRedactsCredentials(t *testing.T) {
 	}
 
 	// Non-JSON response bodies must never have their raw contents dumped into logs.
-	var nonJSONOutput bytes.Buffer
-	debugAPIErrorResponse(newAppLogger(&nonJSONOutput, true), "POST", "/", []byte("raw plaintext error"), knownSecrets...)
+	nonJSONLogger, nonJSONOutput := testLogger(t, true)
+	debugAPIErrorResponse(nonJSONLogger, "POST", "/", []byte("raw plaintext error"), knownSecrets...)
 	if strings.Contains(nonJSONOutput.String(), "plaintext error") {
 		t.Fatal("debug API response exposed non-JSON body contents")
 	}
@@ -245,13 +244,8 @@ func TestAPIRequestContextCancelsInFlightRequest(t *testing.T) {
 	<-requestStarted
 	cancel()
 
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("request cancellation error = %v, want context.Canceled", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("in-flight API request did not stop after cancellation")
+	if err := waitChan(t, done, time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("request cancellation error = %v, want context.Canceled", err)
 	}
 }
 

@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
@@ -152,16 +152,7 @@ func TestStunNominationWait(t *testing.T) {
 func TestStunBindingProbeIsAuthenticatedAndHasNoNominationData(t *testing.T) {
 	const secret = "probe-secret"
 	raw, _ := stunBindingProbe(secret)
-	msg, ok := parseStunMessage(raw)
-	if !ok {
-		t.Fatal("stunBindingProbe produced an invalid STUN message")
-	}
-	if msg.Type != stun.BindingRequest {
-		t.Fatalf("probe type = %s, want Binding Request", msg.Type)
-	}
-	if !validStunIntegrity(msg, secret) {
-		t.Fatal("probe MESSAGE-INTEGRITY did not validate")
-	}
+	msg := requireAuthenticatedBindingRequest(t, raw, secret)
 	if _, err := msg.Get(stun.AttrData); err == nil {
 		t.Fatal("probe unexpectedly carried nomination DATA")
 	}
@@ -169,40 +160,21 @@ func TestStunBindingProbeIsAuthenticatedAndHasNoNominationData(t *testing.T) {
 
 func TestSendPeerCandidateProbeUsesIPv4Socket(t *testing.T) {
 	const secret = "recovery-probe-secret"
-	receiver, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer receiver.Close()
-	sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sender.Close()
+	receiver := loopbackUDP(t)
+	sender := loopbackUDP(t)
 
 	if !sendPeerCandidateProbe(&udpSockets{V4: sender}, receiver.LocalAddr().String(), secret) {
 		t.Fatal("recovery STUN probe was not sent")
 	}
-	if err := receiver.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	buf := make([]byte, 1500)
-	n, _, err := receiver.ReadFromUDP(buf)
+	raw, _, err := readUDP(receiver, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	msg, ok := parseStunMessage(buf[:n])
-	if !ok || msg.Type != stun.BindingRequest || !validStunIntegrity(msg, secret) {
-		t.Fatal("received recovery probe was not an authenticated STUN binding request")
-	}
+	requireAuthenticatedBindingRequest(t, raw, secret)
 }
 
 func TestEarlyNominationStopRestoresSocketDeadline(t *testing.T) {
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
+	conn := loopbackUDP(t)
 
 	listener := newEarlyNominationListener(&udpSockets{V4: conn}, "secret", newNominationTracker())
 	listener.Start()
@@ -211,17 +183,9 @@ func TestEarlyNominationStopRestoresSocketDeadline(t *testing.T) {
 		listener.Stop()
 		close(stopped)
 	}()
-	select {
-	case <-stopped:
-	case <-time.After(time.Second):
-		t.Fatal("early nomination listener did not stop promptly")
-	}
+	waitChan(t, stopped, time.Second)
 
-	sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sender.Close()
+	sender := loopbackUDP(t)
 	if _, err := sender.WriteToUDP([]byte("deadline-check"), conn.LocalAddr().(*net.UDPAddr)); err != nil {
 		t.Fatal(err)
 	}
@@ -258,39 +222,16 @@ func TestCandidatesOfTypeKeepsOnlyTurnRelays(t *testing.T) {
 
 func TestProbeCandidatesSendsAuthenticatedBindingRequest(t *testing.T) {
 	const secret = "fallback-probe-secret"
-	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer peer.Close()
-	local, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer local.Close()
+	peer := loopbackUDP(t)
+	local := loopbackUDP(t)
 
 	result := make(chan error, 1)
-	go func() {
-		_ = peer.SetReadDeadline(time.Now().Add(time.Second))
-		buf := make([]byte, 1500)
-		n, remote, err := peer.ReadFromUDP(buf)
-		if err != nil {
-			result <- err
-			return
-		}
-		msg, ok := parseStunMessage(buf[:n])
-		if !ok || msg.Type != stun.BindingRequest || !validStunIntegrity(msg, secret) {
-			result <- fmt.Errorf("fallback probe was not an authenticated Binding Request")
-			return
-		}
-		_, err = peer.WriteToUDP(stunBindingSuccess(msg, secret), remote)
-		result <- err
-	}()
+	go func() { result <- replyStunBinding(peer, secret, time.Second) }()
 
 	addr := peer.LocalAddr().String()
 	ourLocal := []candidate{{Type: "iface", Addr: "127.0.0.1:1"}}
 	got := probeCandidates(&udpSockets{V4: local}, []candidate{{Type: "iface", Addr: addr}}, secret, ourLocal)
-	if err := <-result; err != nil {
+	if err := waitChan(t, result, 2*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if got != addr {
@@ -303,40 +244,18 @@ func TestProbeCandidatesSendsAuthenticatedBindingRequest(t *testing.T) {
 // responsive candidate is available.
 func TestProbeCandidatesLatencyWhenFirstCandidateUnresponsive(t *testing.T) {
 	const secret = "fallback-latency-secret"
-	// Responsive peer
-	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer peer.Close()
-	local, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer local.Close()
+	peer := loopbackUDP(t)
+	local := loopbackUDP(t)
 
 	go func() {
-		buf := make([]byte, 1500)
 		for {
-			n, remote, err := peer.ReadFromUDP(buf)
-			if err != nil {
-				return
-			}
-			msg, ok := parseStunMessage(buf[:n])
-			if ok && msg.Type == stun.BindingRequest {
-				_, _ = peer.WriteToUDP(stunBindingSuccess(msg, secret), remote)
+			if err := replyStunBinding(peer, secret, 2*time.Second); err != nil {
 				return
 			}
 		}
 	}()
 
-	// Unresponsive port
-	deadConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	deadAddr := deadConn.LocalAddr().String()
-	deadConn.Close() // closed port will not answer
+	deadAddr := closedLoopbackAddr(t)
 
 	liveAddr := peer.LocalAddr().String()
 	cands := []candidate{
@@ -417,13 +336,8 @@ func TestBuildCandidateRetryQueuePreservesObservedThenAdvertised(t *testing.T) {
 		},
 	)
 	want := []string{"203.0.113.2:2000", "203.0.113.3:3000", "192.168.1.1:1000"}
-	if len(got) != len(want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("retry queue = %#v, want %#v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("retry queue = %#v, want %#v", got, want)
-		}
 	}
 }
 

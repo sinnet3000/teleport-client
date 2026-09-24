@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
@@ -66,12 +67,7 @@ func TestWireGuardPathActiveSinceAcceptsRecentHandshakeWithoutBaseline(t *testin
 func TestBuildEndpointRecoveryOrderStartsWithCurrentAndDeduplicates(t *testing.T) {
 	got := buildEndpointRecoveryOrder("candidate-b", []string{"candidate-a", "candidate-b", "", "candidate-c", "candidate-a"})
 	want := []string{"candidate-b", "candidate-a", "candidate-c"}
-	if len(got) != len(want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("recovery order = %#v, want %#v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("recovery order = %#v, want %#v", got, want)
-		}
 	}
 }

@@ -1,15 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 )
 
 func TestAppLoggerLevelsAndRedaction(t *testing.T) {
 	const secret = "do-not-log-this-token"
-	var normal bytes.Buffer
-	logger := newAppLogger(&normal, false)
+	logger, normal := testLogger(t, false)
 	logger.Debug("hidden debug event", "value", "hidden")
 	logger.Info("session event", "session_token", secret, "public_key", "safe-public-value")
 
@@ -27,8 +25,7 @@ func TestAppLoggerLevelsAndRedaction(t *testing.T) {
 		t.Fatalf("normal logger unexpectedly redacted a public value: %q", output)
 	}
 
-	var debug bytes.Buffer
-	debugLogger := newAppLogger(&debug, true)
+	debugLogger, debug := testLogger(t, true)
 	debugLogger.Debug("visible debug event",
 		"credential", secret,
 		"stun_secret", secret,
@@ -47,8 +44,8 @@ func TestAppLoggerLevelsAndRedaction(t *testing.T) {
 }
 
 func TestWireGuardLoggerLevelSelection(t *testing.T) {
-	var normal bytes.Buffer
-	normalWG := newWireGuardLogger(newAppLogger(&normal, false), false)
+	normalLogger, normal := testLogger(t, false)
+	normalWG := newWireGuardLogger(normalLogger, false)
 	normalWG.Verbosef("handshake attempt %d", 1)
 	normalWG.Errorf("handshake failed")
 	if strings.Contains(normal.String(), "handshake attempt") {
@@ -58,8 +55,8 @@ func TestWireGuardLoggerLevelSelection(t *testing.T) {
 		t.Fatalf("normal WireGuard logger dropped error output: %q", normal.String())
 	}
 
-	var debug bytes.Buffer
-	debugWG := newWireGuardLogger(newAppLogger(&debug, true), true)
+	debugLogger, debug := testLogger(t, true)
+	debugWG := newWireGuardLogger(debugLogger, true)
 	debugWG.Verbosef("handshake attempt %d", 2)
 	if !strings.Contains(debug.String(), "handshake attempt 2") {
 		t.Fatalf("debug WireGuard logger dropped verbose output: %q", debug.String())

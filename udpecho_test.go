@@ -10,12 +10,8 @@ import (
 // udpConnPair returns two loopback UDP conns connected to each other.
 func udpConnPair(t *testing.T) (client *net.UDPConn, server *net.UDPConn) {
 	t.Helper()
-	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { server.Close() })
-	client, err = net.DialUDP("udp4", nil, server.LocalAddr().(*net.UDPAddr))
+	server = loopbackUDP(t)
+	client, err := net.DialUDP("udp4", nil, server.LocalAddr().(*net.UDPAddr))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
