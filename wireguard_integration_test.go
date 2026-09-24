@@ -62,7 +62,7 @@ func TestIpcSetReachesPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bind := &stunBind{conn4: ourConn, conn6: nil, stunSecretHash: "deadbeef"}
+	bind := &stunBind{conn4: ourConn, conn6: nil, stunSecret: "deadbeef"}
 	dev := device.NewDevice(tun, bind, device.NewLogger(device.LogLevelVerbose, "wg-test"))
 
 	privHex, _ := genKey(t, 0x00)

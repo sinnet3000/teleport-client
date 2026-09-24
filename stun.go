@@ -152,22 +152,19 @@ func parseStunMessage(data []byte) (*stun.Message, bool) {
 	return &msg, true
 }
 
-// stunIntegrityKey is the session secret as sent to the peer. Teleport's
-// reference Go transport passes this directly to Pion's MessageIntegrity;
-// it is not a SHA-256 digest encoded as base64.
-func stunIntegrityKey(secret string) string {
-	return secret
+func validStunIntegrity(msg *stun.Message, secret string) bool {
+	return secret != "" && stun.NewShortTermIntegrity(secret).Check(msg) == nil
 }
 
-func validStunIntegrity(msg *stun.Message, key string) bool {
-	return key != "" && stun.NewShortTermIntegrity(key).Check(msg) == nil
-}
-
-func stunBindingSuccess(req *stun.Message, secHash string) []byte {
+// stunBindingSuccess builds the Binding Success reply. secret is the session
+// secret as sent to the peer, passed straight to Pion's MessageIntegrity; it
+// is not a SHA-256 digest encoded as base64. An empty secret omits
+// MESSAGE-INTEGRITY (unauthenticated discovery probes).
+func stunBindingSuccess(req *stun.Message, secret string) []byte {
 	var setters []stun.Setter
 	setters = append(setters, stun.NewTransactionIDSetter(req.TransactionID), stun.BindingSuccess)
-	if secHash != "" {
-		setters = append(setters, stun.NewShortTermIntegrity(secHash))
+	if secret != "" {
+		setters = append(setters, stun.NewShortTermIntegrity(secret))
 	}
 	msg := stun.MustBuild(setters...)
 	return msg.Raw
@@ -176,12 +173,12 @@ func stunBindingSuccess(req *stun.Message, secHash string) []byte {
 // respondToStunBindingRequestAddrPort validates an inbound STUN Binding Request's
 // MESSAGE-INTEGRITY, replies with Binding Success over conn, and feeds any
 // nomination DATA payload to tracker. Zero allocations for address representation.
-func respondToStunBindingRequestAddrPort(conn *net.UDPConn, msg *stun.Message, addrPort netip.AddrPort, secretHash string, tracker *nominationTracker) (response []byte, accepted bool) {
-	if !validStunIntegrity(msg, secretHash) {
+func respondToStunBindingRequestAddrPort(conn *net.UDPConn, msg *stun.Message, addrPort netip.AddrPort, secret string, tracker *nominationTracker) (response []byte, accepted bool) {
+	if !validStunIntegrity(msg, secret) {
 		appLog.Debug("discarded STUN request with invalid integrity", "remote", addrPort.String())
 		return nil, false
 	}
-	if resp := stunBindingSuccess(msg, secretHash); resp != nil {
+	if resp := stunBindingSuccess(msg, secret); resp != nil {
 		if conn != nil {
 			_, _ = conn.WriteToUDPAddrPort(resp, addrPort)
 		}
@@ -199,11 +196,11 @@ func respondToStunBindingRequestAddrPort(conn *net.UDPConn, msg *stun.Message, a
 	return response, true
 }
 
-func respondToStunBindingRequest(conn *net.UDPConn, msg *stun.Message, addr *net.UDPAddr, secretHash string, tracker *nominationTracker) (response []byte, accepted bool) {
+func respondToStunBindingRequest(conn *net.UDPConn, msg *stun.Message, addr *net.UDPAddr, secret string, tracker *nominationTracker) (response []byte, accepted bool) {
 	if addr == nil {
 		return nil, false
 	}
-	return respondToStunBindingRequestAddrPort(conn, msg, addr.AddrPort(), secretHash, tracker)
+	return respondToStunBindingRequestAddrPort(conn, msg, addr.AddrPort(), secret, tracker)
 }
 
 func isSTUN(data []byte) bool {

@@ -217,11 +217,11 @@ func (t *nominationTracker) waitForSelection(ctx context.Context, timeout time.D
 // server establishes a mapping for that server, but a symmetric or
 // address-dependent NAT may still drop the console's first packet until we
 // send a packet to the console's exact IP:port tuple.
-func stunBindingProbe(secHash string) ([]byte, [12]byte) {
+func stunBindingProbe(secret string) ([]byte, [12]byte) {
 	var setters []stun.Setter
 	setters = append(setters, stun.TransactionID, stun.BindingRequest)
-	if secHash != "" {
-		setters = append(setters, stun.NewShortTermIntegrity(secHash))
+	if secret != "" {
+		setters = append(setters, stun.NewShortTermIntegrity(secret))
 	}
 	msg := stun.MustBuild(setters...)
 	var tx [12]byte
@@ -233,7 +233,7 @@ func stunBindingProbe(secHash string) ([]byte, [12]byte) {
 // console's master-driven nomination reaches us, then keeps pinging at a
 // slower cadence until stop() is called so a slow nomination doesn't let the
 // NAT/relay mapping go stale before an endpoint is finally selected.
-func startPeerCandidateProbes(s *udpSockets, candidates []candidate, secHash string) func() {
+func startPeerCandidateProbes(s *udpSockets, candidates []candidate, secret string) func() {
 	done := make(chan struct{})
 	var stopOnce sync.Once
 	var wg sync.WaitGroup
@@ -247,7 +247,7 @@ func startPeerCandidateProbes(s *udpSockets, candidates []candidate, secHash str
 
 	send := func() {
 		for _, candidate := range candidates {
-			sendPeerCandidateProbe(s, candidate.Addr, secHash)
+			sendPeerCandidateProbe(s, candidate.Addr, secret)
 		}
 	}
 
@@ -289,7 +289,7 @@ func startPeerCandidateProbes(s *udpSockets, candidates []candidate, secHash str
 // sendPeerCandidateProbe refreshes the candidate's exact NAT/relay tuple and
 // gives the console another authenticated STUN packet to answer before a
 // WireGuard handshake is attempted on that endpoint.
-func sendPeerCandidateProbe(s *udpSockets, addr, secHash string) bool {
+func sendPeerCandidateProbe(s *udpSockets, addr, secret string) bool {
 	if s == nil {
 		return false
 	}
@@ -312,7 +312,7 @@ func sendPeerCandidateProbe(s *udpSockets, addr, secHash string) bool {
 	if err != nil {
 		return false
 	}
-	probe, _ := stunBindingProbe(secHash)
+	probe, _ := stunBindingProbe(secret)
 	if _, err := conn.WriteToUDP(probe, remote); err != nil {
 		appLog.Debug("candidate STUN probe failed", "candidate", addr, "network", network, "error", err)
 		return false
@@ -396,9 +396,9 @@ type nominationHint struct {
 // before CONNECT_RESPONSE: the console can complete its nomination wait
 // sequence before the CONNECT poll loop even observes a response.
 type earlyNominationListener struct {
-	sockets        *udpSockets
-	stunSecretHash string
-	nomination     *nominationTracker
+	sockets    *udpSockets
+	stunSecret string
+	nomination *nominationTracker
 
 	hints chan nominationHint
 
@@ -410,11 +410,11 @@ type earlyNominationListener struct {
 	stop *udpReadStopper
 }
 
-func newEarlyNominationListener(sockets *udpSockets, stunSecretHash string, nomination *nominationTracker) *earlyNominationListener {
+func newEarlyNominationListener(sockets *udpSockets, stunSecret string, nomination *nominationTracker) *earlyNominationListener {
 	return &earlyNominationListener{
-		sockets:        sockets,
-		stunSecretHash: stunSecretHash,
-		nomination:     nomination,
+		sockets:    sockets,
+		stunSecret: stunSecret,
+		nomination: nomination,
 		hints:          make(chan nominationHint, 1),
 		stop:           newUDPReadStopper(sockets),
 	}
@@ -464,7 +464,7 @@ func (l *earlyNominationListener) readLoop(conn *net.UDPConn, done <-chan struct
 		if !ok || msg.Type != stun.BindingRequest {
 			continue
 		}
-		resp, accepted := respondToStunBindingRequest(conn, msg, addr, l.stunSecretHash, l.nomination)
+		resp, accepted := respondToStunBindingRequest(conn, msg, addr, l.stunSecret, l.nomination)
 		if !accepted {
 			continue
 		}
@@ -543,7 +543,7 @@ func rankCandidates(c []candidate) []candidate {
 	return out
 }
 
-func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string, local []candidate) string {
+func probeCandidates(s *udpSockets, cands []candidate, sessionSecret string, local []candidate) string {
 	ordered := compatibleCandidates(s, cands, local)
 	appLog.Debug("fallback probe starting", "candidates", len(ordered))
 	if s == nil || len(ordered) == 0 {
@@ -614,7 +614,7 @@ func probeCandidates(s *udpSockets, cands []candidate, sessionSecretHash string,
 	defer reader.Stop()
 
 	for _, t := range targets {
-		req, _ := stunBindingProbe(sessionSecretHash)
+		req, _ := stunBindingProbe(sessionSecret)
 		_, _ = t.conn.WriteToUDP(req, t.remote)
 		appLog.Debug("fallback probe sent", "candidate", t.addr)
 	}

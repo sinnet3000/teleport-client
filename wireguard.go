@@ -91,12 +91,12 @@ func (s *udpSockets) Close() {
 // It handles STUN Binding Requests inline and passes only WireGuard packets to
 // wireguard-go.
 type stunBind struct {
-	conn4          *net.UDPConn
-	conn6          *net.UDPConn
-	port           uint16
-	stunSecretHash string
-	mu             sync.Mutex
-	done           chan struct{}
+	conn4      *net.UDPConn
+	conn6      *net.UDPConn
+	port       uint16
+	stunSecret string
+	mu         sync.Mutex
+	done       chan struct{}
 
 	stunCount  atomic.Uint64
 	recvCount  atomic.Uint64
@@ -134,7 +134,7 @@ func (b *stunBind) handleSTUN(c *net.UDPConn, data []byte, addrPort netip.AddrPo
 		appLog.Debug("received STUN packet", "type", msg.Type.String(), "remote", addrPort.String(), "count", n)
 	}
 	if msg.Type == stun.BindingRequest {
-		respondToStunBindingRequestAddrPort(c, msg, addrPort, b.stunSecretHash, b.nomination)
+		respondToStunBindingRequestAddrPort(c, msg, addrPort, b.stunSecret, b.nomination)
 	}
 }
 

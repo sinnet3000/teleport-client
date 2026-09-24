@@ -131,11 +131,10 @@ func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionR
 	}
 
 	stunSecret := randomB64(32)
-	stunSecretHash := stunIntegrityKey(stunSecret)
 	nomination := newNominationTracker()
 	var early *earlyNominationListener
 	if !flags.forceTurn {
-		early = newEarlyNominationListener(sockets, stunSecretHash, nomination)
+		early = newEarlyNominationListener(sockets, stunSecret, nomination)
 		early.Start()
 		defer early.Stop()
 	}
@@ -149,12 +148,12 @@ func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionR
 		if len(turnCandidates) == 0 {
 			return connectionAttemptResult{}, errors.New("--turn requested, but the console advertised no compatible TURN relay candidate")
 		}
-		early = newEarlyNominationListener(sockets, stunSecretHash, nomination)
+		early = newEarlyNominationListener(sockets, stunSecret, nomination)
 		early.restrictToCandidates(turnCandidates)
 		early.Start()
 		defer early.Stop()
 	}
-	endpoint, endpointMode, candidateQueue, candidateTypes, err := negotiateEndpoint(ctx, flags.endpointOverride, flags.forceTurn, sockets, port, connResp, stunSecretHash, nomination, early, local)
+	endpoint, endpointMode, candidateQueue, candidateTypes, err := negotiateEndpoint(ctx, flags.endpointOverride, flags.forceTurn, sockets, port, connResp, stunSecret, nomination, early, local)
 	if err != nil {
 		return connectionAttemptResult{}, err
 	}
@@ -180,7 +179,6 @@ func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionR
 		endpoint:       endpoint,
 		connResp:       connResp,
 		stunSecret:     stunSecret,
-		stunSecretHash: stunSecretHash,
 		sockets:        sockets,
 		nomination:     nomination,
 		socks5Addr:     flags.socks5Addr,
@@ -497,7 +495,7 @@ func connectAndAwaitResponse(ctx context.Context, session sessionResult, name, p
 // early listener, or — as a last resort — concurrent candidate probing via
 // probeCandidates. It also returns the ranked queue of candidates that sent
 // us a Binding Request, for the post-connect endpoint retry loop.
-func negotiateEndpoint(ctx context.Context, endpointOverride string, forceTurn bool, sockets *udpSockets, port int, connResp *apiResponse, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate) (endpoint, mode string, candidateQueue []string, candidateTypes map[string]string, err error) {
+func negotiateEndpoint(ctx context.Context, endpointOverride string, forceTurn bool, sockets *udpSockets, port int, connResp *apiResponse, stunSecret string, nomination *nominationTracker, early *earlyNominationListener, local []candidate) (endpoint, mode string, candidateQueue []string, candidateTypes map[string]string, err error) {
 	peerCandidates := connResp.ServerInfo.PeerDesc.Candidates
 	if forceTurn {
 		peerCandidates = compatibleCandidates(sockets, candidatesOfType(peerCandidates, "turn"), local)
@@ -507,12 +505,12 @@ func negotiateEndpoint(ctx context.Context, endpointOverride string, forceTurn b
 		appLog.Debug("peer candidate", "type", c.Type, "address", c.Addr)
 	}
 
-	stopCandidateProbes := startPeerCandidateProbes(sockets, peerCandidates, stunSecretHash)
+	stopCandidateProbes := startPeerCandidateProbes(sockets, peerCandidates, stunSecret)
 	defer stopCandidateProbes()
 	if endpointOverride != "" {
 		endpoint, mode = endpointOverride, "override"
 	} else {
-		endpoint, mode, candidateQueue, err = resolveNominatedEndpoint(ctx, sockets, port, peerCandidates, stunSecretHash, nomination, early, local)
+		endpoint, mode, candidateQueue, err = resolveNominatedEndpoint(ctx, sockets, port, peerCandidates, stunSecret, nomination, early, local)
 		if err != nil {
 			return "", "", nil, nil, err
 		}
@@ -539,7 +537,7 @@ func candidatesOfType(candidates []candidate, candidateType string) []candidate 
 
 // resolveNominatedEndpoint tries per-tuple nomination, then an observed
 // inbound Binding Request, then the fallback probeCandidates fan-out.
-func resolveNominatedEndpoint(ctx context.Context, sockets *udpSockets, port int, peerCandidates []candidate, stunSecretHash string, nomination *nominationTracker, early *earlyNominationListener, local []candidate) (endpoint, mode string, candidateQueue []string, err error) {
+func resolveNominatedEndpoint(ctx context.Context, sockets *udpSockets, port int, peerCandidates []candidate, stunSecret string, nomination *nominationTracker, early *earlyNominationListener, local []candidate) (endpoint, mode string, candidateQueue []string, err error) {
 	// The Android bridge waits up to 40s for a verified per-tuple sequence.
 	nomination.activate()
 	appLog.Debug("waiting for per-tuple nomination", "timeout", "40s")
@@ -571,7 +569,7 @@ func resolveNominatedEndpoint(ctx context.Context, sockets *udpSockets, port int
 	}
 	if endpoint == "" {
 		early.Stop()
-		endpoint = probeCandidates(sockets, peerCandidates, stunSecretHash, local)
+		endpoint = probeCandidates(sockets, peerCandidates, stunSecret, local)
 		if err := ctx.Err(); err != nil {
 			return "", "", nil, err
 		}

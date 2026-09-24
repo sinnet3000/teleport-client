@@ -23,7 +23,6 @@ type tunnelParams struct {
 	endpoint       string
 	connResp       *apiResponse
 	stunSecret     string
-	stunSecretHash string
 	sockets        *udpSockets
 	nomination     *nominationTracker
 	socks5Addr     string
@@ -115,7 +114,7 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 		return err
 	}
 
-	bind := &stunBind{conn4: p.sockets.V4, conn6: p.sockets.V6, stunSecretHash: p.stunSecretHash, nomination: p.nomination}
+	bind := &stunBind{conn4: p.sockets.V4, conn6: p.sockets.V6, stunSecret: p.stunSecret, nomination: p.nomination}
 	dev := device.NewDevice(tun, bind, newWireGuardLogger(appLog, p.debug))
 	defer dev.Close()
 	var workerWG sync.WaitGroup
@@ -142,7 +141,7 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 		workerWG.Add(1)
 		go func() {
 			defer workerWG.Done()
-			retryEndpointOnHandshakeTimeout(lifecycleCtx, dev, peerPubHex, p.endpoint, p.candidateQueue, p.candidateTypes, p.nomination, p.sockets, p.stunSecretHash, renegotiate)
+			retryEndpointOnHandshakeTimeout(lifecycleCtx, dev, peerPubHex, p.endpoint, p.candidateQueue, p.candidateTypes, p.nomination, p.sockets, p.stunSecret, renegotiate)
 		}()
 	}
 	echoStopped := make(chan error, 1)
@@ -203,19 +202,19 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 				}
 				if recoveryCancel == nil {
 					appLog.Warn("WireGuard tunnel unhealthy; starting automatic endpoint recovery")
-					recoveryCancel = startWireGuardEndpointRecovery(lifecycleCtx, &workerWG, dev, peerPubHex, current.endpoint, knownEndpoints, p.sockets, p.stunSecretHash, renegotiate)
+					recoveryCancel = startWireGuardEndpointRecovery(lifecycleCtx, &workerWG, dev, peerPubHex, current.endpoint, knownEndpoints, p.sockets, p.stunSecret, renegotiate)
 				}
 			}
 		}
 	}
 }
 
-func startWireGuardEndpointRecovery(parent context.Context, wg *sync.WaitGroup, dev *device.Device, peerPubHex, currentEndpoint string, knownEndpoints []string, sockets *udpSockets, stunSecretHash string, exhausted chan<- struct{}) context.CancelFunc {
+func startWireGuardEndpointRecovery(parent context.Context, wg *sync.WaitGroup, dev *device.Device, peerPubHex, currentEndpoint string, knownEndpoints []string, sockets *udpSockets, stunSecret string, exhausted chan<- struct{}) context.CancelFunc {
 	recoveryCtx, cancel := context.WithCancel(parent)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		recoverWireGuardEndpoints(recoveryCtx, dev, peerPubHex, currentEndpoint, knownEndpoints, sockets, stunSecretHash, exhausted)
+		recoverWireGuardEndpoints(recoveryCtx, dev, peerPubHex, currentEndpoint, knownEndpoints, sockets, stunSecret, exhausted)
 	}()
 	return cancel
 }
@@ -267,7 +266,7 @@ func wireGuardPathActiveSince(baseline, current wireGuardPeerStats, now time.Tim
 	return !current.lastHandshake.IsZero() && now.Sub(current.lastHandshake) <= wireGuardRecentHandshakeWindow
 }
 
-func recoverWireGuardEndpoints(ctx context.Context, dev *device.Device, peerPubHex, currentEndpoint string, knownEndpoints []string, sockets *udpSockets, stunSecretHash string, exhausted chan<- struct{}) {
+func recoverWireGuardEndpoints(ctx context.Context, dev *device.Device, peerPubHex, currentEndpoint string, knownEndpoints []string, sockets *udpSockets, stunSecret string, exhausted chan<- struct{}) {
 	backoff := 5 * time.Second
 	for round := 1; round <= endpointRecoveryRounds; round++ {
 		endpoints := buildEndpointRecoveryOrder(currentEndpoint, knownEndpoints)
@@ -277,7 +276,7 @@ func recoverWireGuardEndpoints(ctx context.Context, dev *device.Device, peerPubH
 				return
 			default:
 			}
-			if err := switchEndpoint(dev, peerPubHex, endpoint, sockets, stunSecretHash); err != nil {
+			if err := switchEndpoint(dev, peerPubHex, endpoint, sockets, stunSecret); err != nil {
 				appLog.Warn("automatic endpoint recovery update failed", "endpoint", endpoint, "error", err)
 			} else {
 				appLog.Warn("automatic endpoint recovery trying candidate", "endpoint", endpoint, "round", round)
@@ -338,7 +337,7 @@ func candidateDwell(addr string, candidateTypes map[string]string) time.Duration
 // queued candidate if the current endpoint hasn't completed a handshake
 // within its candidateDwell, giving up after candidateRetryMaxDuration or
 // once the queue is exhausted.
-func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, peerPubHex, currentEndpoint string, candidateQueue []string, candidateTypes map[string]string, nomination *nominationTracker, sockets *udpSockets, stunSecretHash string, exhausted chan<- struct{}) {
+func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, peerPubHex, currentEndpoint string, candidateQueue []string, candidateTypes map[string]string, nomination *nominationTracker, sockets *udpSockets, stunSecret string, exhausted chan<- struct{}) {
 	queueIdx := 0
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -360,7 +359,7 @@ func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, pe
 			if selected == "" || selected == currentEndpoint {
 				continue
 			}
-			if err := switchEndpoint(dev, peerPubHex, selected, sockets, stunSecretHash); err == nil {
+			if err := switchEndpoint(dev, peerPubHex, selected, sockets, stunSecret); err == nil {
 				appLog.Warn("switching endpoint to late verified nomination", "endpoint", selected)
 				currentEndpoint = selected
 				lastSwitchTime = time.Now()
@@ -402,7 +401,7 @@ func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, pe
 			nextCandidateAddr, nextIdx, ok := nextEndpointCandidate(candidateQueue, queueIdx, currentEndpoint)
 			queueIdx = nextIdx
 			if ok {
-				if err := switchEndpoint(dev, peerPubHex, nextCandidateAddr, sockets, stunSecretHash); err == nil {
+				if err := switchEndpoint(dev, peerPubHex, nextCandidateAddr, sockets, stunSecret); err == nil {
 					appLog.Warn("switching endpoint after handshake timeout", "endpoint", nextCandidateAddr)
 					currentEndpoint = nextCandidateAddr
 					lastSwitchTime = time.Now()
@@ -418,8 +417,8 @@ func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, pe
 }
 
 // switchEndpoint probes addr and updates the peer's WireGuard endpoint.
-func switchEndpoint(dev *device.Device, peerPubHex, addr string, sockets *udpSockets, stunSecretHash string) error {
-	sendPeerCandidateProbe(sockets, addr, stunSecretHash)
+func switchEndpoint(dev *device.Device, peerPubHex, addr string, sockets *udpSockets, stunSecret string) error {
+	sendPeerCandidateProbe(sockets, addr, stunSecret)
 	ipc := fmt.Sprintf("public_key=%s\nendpoint=%s\n", peerPubHex, addr)
 	return dev.IpcSet(ipc)
 }
