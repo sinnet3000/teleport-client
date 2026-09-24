@@ -272,13 +272,15 @@ func parseFlags() cliFlags {
 	}
 	socks5PassValue := *socks5Pass
 	socks5PassSource := "--socks5-pass"
-	if socks5PassValue == "" && *socks5User != "" {
+	envPass := os.Getenv("TELEPORT_SOCKS5_PASS")
+	if envPass != "" && *socks5User == "" {
+		fmt.Fprintf(os.Stderr, "warning: TELEPORT_SOCKS5_PASS is set but --socks5-user is empty; ignoring password (SOCKS5 auth stays disabled)\n")
+	}
+	if socks5PassValue == "" && *socks5User != "" && envPass != "" {
 		// Only consult the environment when a user is configured, so a
 		// stray TELEPORT_SOCKS5_PASS does not break no-auth startups.
-		if envPass := os.Getenv("TELEPORT_SOCKS5_PASS"); envPass != "" {
-			socks5PassValue = envPass
-			socks5PassSource = "TELEPORT_SOCKS5_PASS"
-		}
+		socks5PassValue = envPass
+		socks5PassSource = "TELEPORT_SOCKS5_PASS"
 	}
 	if (*socks5User == "") != (socks5PassValue == "") {
 		failUsage("--socks5-user and --socks5-pass must be set together (password may also come from TELEPORT_SOCKS5_PASS)")
