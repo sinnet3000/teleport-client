@@ -20,13 +20,14 @@ func udpConnPair(t *testing.T) (client *net.UDPConn, server *net.UDPConn) {
 }
 
 // withFastEchoTimeouts shrinks the package-level deadline vars for the
-// duration of a test and restores them afterward.
+// duration of a test and restores them afterward. Values stay large enough
+// to absorb a brief GC/scheduler pause without failing a correct path.
 func withFastEchoTimeouts(t *testing.T) {
 	t.Helper()
 	origDeadline, origRetry, origCeiling := steadyStateEchoDeadline, startupRetryInterval, startupCeiling
-	steadyStateEchoDeadline = 20 * time.Millisecond
-	startupRetryInterval = 20 * time.Millisecond
-	startupCeiling = 100 * time.Millisecond
+	steadyStateEchoDeadline = 50 * time.Millisecond
+	startupRetryInterval = 50 * time.Millisecond
+	startupCeiling = 250 * time.Millisecond
 	t.Cleanup(func() {
 		steadyStateEchoDeadline, startupRetryInterval, startupCeiling = origDeadline, origRetry, origCeiling
 	})

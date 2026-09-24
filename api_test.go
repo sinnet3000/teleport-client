@@ -20,8 +20,19 @@ func TestAPIRequestRejectsEmptyErrorResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if _, err := apiRequestContext(context.Background(), server.URL, http.MethodGet, "/", "", nil); err == nil {
+	_, err := apiRequestContext(context.Background(), server.URL, http.MethodGet, "/", "", nil)
+	if err == nil {
 		t.Fatal("apiRequest accepted an empty HTTP error response")
+	}
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error type = %T, want *apiError: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("StatusCode = %d, want 401", apiErr.StatusCode)
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Fatalf("error should mention HTTP status: %v", err)
 	}
 }
 

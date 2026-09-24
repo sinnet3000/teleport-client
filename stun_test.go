@@ -100,10 +100,10 @@ func TestReflexiveDiscoveryClearsReadDeadline(t *testing.T) {
 		t.Fatalf("STUN server failed: %v", err)
 	}
 
-	// Let the discovery deadline expire, then prove the same socket can still
-	// receive nomination traffic. Before the fix ReadFromUDP returned an
-	// immediate timeout here.
-	time.Sleep(250 * time.Millisecond)
+	// Wait past the discovery timeout (200ms) so a leftover read deadline
+	// would fire, then prove the same socket can still receive nomination
+	// traffic. Before the fix ReadFromUDP returned an immediate timeout here.
+	time.Sleep(350 * time.Millisecond)
 	if _, err := server.WriteToUDP([]byte("nomination"), client.LocalAddr().(*net.UDPAddr)); err != nil {
 		t.Fatal(err)
 	}

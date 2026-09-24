@@ -44,16 +44,20 @@ func TestIsLoopbackBindHost(t *testing.T) {
 	}
 }
 
-func TestSocks5AuthEnabled(t *testing.T) {
+func TestSocks5AuthMethods(t *testing.T) {
 	if (socks5Auth{}).enabled() {
 		t.Fatal("zero socks5Auth should be disabled")
 	}
 	if !(socks5Auth{user: "a", pass: "b"}).enabled() {
 		t.Fatal("user/pass socks5Auth should be enabled")
 	}
-}
+	if got := authLogMode(socks5Auth{}); got != "none" {
+		t.Fatalf("authLogMode(zero) = %q, want none", got)
+	}
+	if got := authLogMode(socks5Auth{user: "u", pass: "p"}); got != "userpass" {
+		t.Fatalf("authLogMode(userpass) = %q, want userpass", got)
+	}
 
-func TestSocks5AuthMethods(t *testing.T) {
 	methods := socks5AuthMethods(socks5Auth{})
 	if len(methods) != 1 {
 		t.Fatalf("no-auth methods len = %d, want 1", len(methods))
@@ -81,14 +85,5 @@ func TestSocks5AuthMethods(t *testing.T) {
 	}
 	if up.Credentials.Valid("bob", "secret", "") {
 		t.Fatal("credentials should reject unknown user")
-	}
-}
-
-func TestAuthLogMode(t *testing.T) {
-	if got := authLogMode(socks5Auth{}); got != "none" {
-		t.Fatalf("authLogMode(zero) = %q, want none", got)
-	}
-	if got := authLogMode(socks5Auth{user: "u", pass: "p"}); got != "userpass" {
-		t.Fatalf("authLogMode(userpass) = %q, want userpass", got)
 	}
 }

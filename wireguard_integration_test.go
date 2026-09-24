@@ -77,10 +77,8 @@ func TestIpcSetReachesPeer(t *testing.T) {
 		t.Fatalf("PEER NOT CREATED. IpcGet:\n%s", got)
 	}
 	t.Log("PEER CREATED: public_key present in IpcGet output")
-	if strings.Contains(got, "endpoint="+endpoint) {
-		t.Log("endpoint applied to peer:", endpoint)
-	} else {
-		t.Logf("WARNING: endpoint not found in peer config:\n%s", got)
+	if !strings.Contains(got, "endpoint="+endpoint) {
+		t.Fatalf("endpoint not applied to peer (handshake would never leave). IpcGet:\n%s", got)
 	}
 
 	if err := dev.Up(); err != nil {

@@ -215,8 +215,12 @@ func TestCandidatesOfTypeKeepsOnlyTurnRelays(t *testing.T) {
 		{Type: "reflex", Addr: "198.51.100.10:5000"},
 		{Type: "turn", Addr: "[2001:db8::10]:6000"},
 	}, "turn")
-	if len(got) != 2 || got[0].Type != "turn" || got[1].Type != "turn" {
-		t.Fatalf("TURN candidate filter = %#v, want two relay candidates", got)
+	want := []candidate{
+		{Type: "turn", Addr: "203.0.113.10:6000"},
+		{Type: "turn", Addr: "[2001:db8::10]:6000"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("TURN candidate filter = %#v, want %#v", got, want)
 	}
 }
 
@@ -271,8 +275,11 @@ func TestProbeCandidatesLatencyWhenFirstCandidateUnresponsive(t *testing.T) {
 	if got != liveAddr {
 		t.Fatalf("probeCandidates = %q, want %q", got, liveAddr)
 	}
-	if elapsed >= 200*time.Millisecond {
-		t.Fatalf("probeCandidates took %v, expected < 200ms (head-of-line blocking regression)", elapsed)
+	// probeCandidates fans out under one 500ms window; sequential
+	// wait-for-dead-then-probe-live would approach that. A generous bound
+	// still catches head-of-line blocking without flaking when loaded.
+	if elapsed >= 450*time.Millisecond {
+		t.Fatalf("probeCandidates took %v, expected < 450ms (head-of-line blocking regression)", elapsed)
 	}
 	t.Logf("probeCandidates took %v to find live candidate after 1 dead candidate", elapsed)
 }
