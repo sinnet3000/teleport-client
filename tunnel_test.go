@@ -34,6 +34,32 @@ func TestParseWireGuardPeerStats(t *testing.T) {
 	}
 }
 
+// TestParseWireGuardPeerStatsHandshakeDetection covers the values
+// retryEndpointOnHandshakeTimeout relies on: only a parsed, positive
+// last_handshake_time_sec counts as a completed handshake. The old inline
+// parser treated any non-"0" string (including garbage) as success.
+func TestParseWireGuardPeerStatsHandshakeDetection(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		ipc  string
+		want bool
+	}{
+		{"zero", "last_handshake_time_sec=0", false},
+		{"missing", "endpoint=203.0.113.1:51820", false},
+		{"empty value", "last_handshake_time_sec=", false},
+		{"positive", "last_handshake_time_sec=1700000000", true},
+		{"garbage", "last_handshake_time_sec=not-a-number", false},
+		{"negative", "last_handshake_time_sec=-5", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := !parseWireGuardPeerStats(tt.ipc).lastHandshake.IsZero()
+			if got != tt.want {
+				t.Fatalf("handshake detected = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWireGuardPathActiveSinceRequiresProgressFromHealthyBaseline(t *testing.T) {
 	now := time.Unix(1700000100, 0)
 	baseline := wireGuardPeerStats{lastHandshake: now.Add(-time.Minute), rxBytes: 100, valid: true}

@@ -377,18 +377,7 @@ func retryEndpointOnHandshakeTimeout(ctx context.Context, dev *device.Device, pe
 			continue
 		}
 
-		handshakeOK := false
-		lines := strings.Split(ipcData, "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(line, "last_handshake_time_sec=") {
-				val := strings.TrimPrefix(line, "last_handshake_time_sec=")
-				if val != "0" && val != "" {
-					handshakeOK = true
-				}
-			}
-		}
-
-		if handshakeOK {
+		if !parseWireGuardPeerStats(ipcData).lastHandshake.IsZero() {
 			return
 		}
 		if time.Since(devUpTime) >= candidateRetryMaxDuration {
