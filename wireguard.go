@@ -71,7 +71,27 @@ func openUDPSockets(port int, family networkFamily) (*udpSockets, error) {
 	if v4 == nil && v6 == nil {
 		return nil, errors.New("no UDP socket available")
 	}
+	if v4 != nil {
+		tuneUDPSocketBuffers(v4, "udp4")
+	}
+	if v6 != nil {
+		tuneUDPSocketBuffers(v6, "udp6")
+	}
 	return &udpSockets{V4: v4, V6: v6}, nil
+}
+
+const defaultUDPBufferSize = 4 * 1024 * 1024
+
+func tuneUDPSocketBuffers(c *net.UDPConn, network string) {
+	if c == nil {
+		return
+	}
+	if err := c.SetReadBuffer(defaultUDPBufferSize); err != nil {
+		appLog.Debug("unable to set UDP read buffer size", "network", network, "error", err)
+	}
+	if err := c.SetWriteBuffer(defaultUDPBufferSize); err != nil {
+		appLog.Debug("unable to set UDP write buffer size", "network", network, "error", err)
+	}
 }
 
 func (s *udpSockets) Close() {
