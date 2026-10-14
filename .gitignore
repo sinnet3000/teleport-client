@@ -4,3 +4,4 @@ teleport-session*.json
 sessions/
 .claude/
 .DS_Store
+.kata.local.toml

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +13,7 @@ const redactedLogValue = "[REDACTED]"
 
 type appLogger struct {
 	logger *slog.Logger
+	debug  bool
 }
 
 func newAppLogger(w io.Writer, debug bool) *appLogger {
@@ -30,7 +30,7 @@ func newAppLogger(w io.Writer, debug bool) *appLogger {
 			return attr
 		},
 	})
-	return &appLogger{logger: slog.New(handler)}
+	return &appLogger{logger: slog.New(handler), debug: debug}
 }
 
 func sensitiveLogKey(key string) bool {
@@ -43,7 +43,7 @@ func sensitiveLogKey(key string) bool {
 	return false
 }
 
-func (l *appLogger) IsDebug() bool                     { return l.logger.Enabled(context.Background(), slog.LevelDebug) }
+func (l *appLogger) IsDebug() bool                     { return l.debug }
 func (l *appLogger) Debug(message string, args ...any) { l.logger.Debug(message, args...) }
 func (l *appLogger) Info(message string, args ...any)  { l.logger.Info(message, args...) }
 func (l *appLogger) Warn(message string, args ...any)  { l.logger.Warn(message, args...) }

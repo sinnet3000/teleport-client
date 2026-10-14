@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"strings"
 	"syscall"
 	"time"
@@ -53,6 +54,20 @@ type sessionResult struct {
 func main() {
 	flags := parseFlags()
 	appLog = newAppLogger(os.Stderr, flags.debug)
+	if cpuProfile := os.Getenv("TELEPORT_CPUPROFILE"); cpuProfile != "" {
+		f, err := os.Create(cpuProfile)
+		if err != nil {
+			appLog.Error("failed to create CPU profile", "path", cpuProfile, "error", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			appLog.Error("failed to start CPU profile", "error", err)
+			os.Exit(1)
+		}
+		defer pprof.StopCPUProfile()
+		appLog.Info("CPU profiling enabled", "path", cpuProfile)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
