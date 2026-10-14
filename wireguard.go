@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -228,9 +227,9 @@ func (b *stunBind) ParseEndpoint(s string) (conn.Endpoint, error) {
 }
 
 func (b *stunBind) BatchSize() int {
-	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
-		return conn.IdealBatchSize
-	}
+	// stunBind currently performs single-packet reads/writes via *net.UDPConn.
+	// Returning 1 prevents wireguard-go from allocating IdealBatchSize (128)
+	// element buffer arrays per routine until vectorized recvmmsg/sendmmsg is implemented.
 	return 1
 }
 
