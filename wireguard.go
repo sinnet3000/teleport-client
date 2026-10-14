@@ -137,6 +137,7 @@ func (b *stunBind) handleSTUN(c *net.UDPConn, data []byte, addrPort netip.AddrPo
 }
 
 func (b *stunBind) makeRecvFunc(c *net.UDPConn, done chan struct{}) conn.ReceiveFunc {
+	var last *conn.StdNetEndpoint
 	return func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
 		for {
 			n, addrPort, err := c.ReadFromUDPAddrPort(packets[0])
@@ -160,7 +161,12 @@ func (b *stunBind) makeRecvFunc(c *net.UDPConn, done chan struct{}) conn.Receive
 				appLog.Debug("passing UDP packet to WireGuard", "bytes", n, "remote", addrPort.String(), "count", rn)
 			}
 			sizes[0] = n
-			eps[0] = &conn.StdNetEndpoint{AddrPort: addrPort}
+			if last != nil && last.AddrPort == addrPort {
+				eps[0] = last
+			} else {
+				last = &conn.StdNetEndpoint{AddrPort: addrPort}
+				eps[0] = last
+			}
 			return 1, nil
 		}
 	}
