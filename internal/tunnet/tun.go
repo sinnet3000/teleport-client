@@ -69,10 +69,17 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int, opts ...Opti
 		dnsServers:     dnsServers,
 	}
 	dev.mtu.Store(int32(mtu))
+
+	cleanupStack := true
+	defer func() {
+		if cleanupStack {
+			dev.stack.Close()
+		}
+	}()
+
 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
 	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
 	if tcpipErr != nil {
-		dev.stack.Close()
 		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
 	}
 
@@ -83,13 +90,11 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int, opts ...Opti
 		}
 	}
 	if err := applyOptions(dev.stack, cfg); err != nil {
-		dev.stack.Close()
 		return nil, nil, err
 	}
 	dev.notifyHandle = dev.ep.AddNotify(dev)
 	tcpipErr = dev.stack.CreateNIC(1, dev.ep)
 	if tcpipErr != nil {
-		dev.stack.Close()
 		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
 	}
 	for _, ip := range localAddresses {
@@ -120,6 +125,7 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int, opts ...Opti
 		dev.stack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: 1})
 	}
 
+	cleanupStack = false
 	dev.events <- tun.EventUp
 	return dev, (*Net)(dev), nil
 }

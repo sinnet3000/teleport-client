@@ -57,8 +57,12 @@ func WithCongestionControl(cc string) Option {
 // WithBufferSizes sets custom send and receive buffer size ranges.
 func WithBufferSizes(tx tcpip.TCPSendBufferSizeRangeOption, rx tcpip.TCPReceiveBufferSizeRangeOption) Option {
 	return func(o *Options) {
-		o.SendBufferSize = tx
-		o.ReceiveBufferSize = rx
+		if tx.Max > 0 {
+			o.SendBufferSize = tx
+		}
+		if rx.Max > 0 {
+			o.ReceiveBufferSize = rx
+		}
 	}
 }
 

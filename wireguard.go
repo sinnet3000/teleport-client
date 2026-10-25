@@ -322,6 +322,22 @@ func resolveConfiguredMTU(cliMTU int, envMTU string) (int, error) {
 	return 0, nil
 }
 
+// resolveTCPCongestionControl validates and normalizes the TELEPORT_TCP_CONGESTION_CONTROL
+// environment variable. If empty, it returns ("", nil). Supported algorithms are
+// "reno" and "cubic" (matching gVisor netstack support).
+func resolveTCPCongestionControl(envVal string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(envVal))
+	if trimmed == "" {
+		return "", nil
+	}
+	switch trimmed {
+	case "reno", "cubic":
+		return trimmed, nil
+	default:
+		return "", fmt.Errorf("unsupported TELEPORT_TCP_CONGESTION_CONTROL %q; supported: reno, cubic", envVal)
+	}
+}
+
 // parseDarwinRouteMTU parses the route MTU from `route -n get` output on BSD/Darwin.
 // The output contains a metrics header line with an `mtu` column followed by values.
 func parseDarwinRouteMTU(output string) int {

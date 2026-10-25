@@ -6,32 +6,32 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.zx2c4.com/wireguard/device"
 	"github.com/sinnet3000/teleport-client/internal/tunnet"
+	"golang.zx2c4.com/wireguard/device"
 )
 
 // tunnelParams collects everything runTunnel needs to bring the WireGuard
 // device up over the endpoint negotiateEndpoint selected.
 type tunnelParams struct {
-	priv           string
-	port           int
-	endpoint       string
-	connResp       *apiResponse
-	stunSecret     string
-	sockets        *udpSockets
-	nomination     *nominationTracker
-	socks5Addr     string
-	socks5Auth     socks5Auth
-	debug          bool
-	candidateQueue []string
-	candidateTypes map[string]string
-	mtu            int
+	priv                 string
+	port                 int
+	endpoint             string
+	connResp             *apiResponse
+	stunSecret           string
+	sockets              *udpSockets
+	nomination           *nominationTracker
+	socks5Addr           string
+	socks5Auth           socks5Auth
+	debug                bool
+	candidateQueue       []string
+	candidateTypes       map[string]string
+	mtu                  int
+	tcpCongestionControl string
 }
 
 const (
@@ -121,9 +121,9 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 		appLog.Info("path MTU configured", "endpoint", endpointAddr.String(), "mtu", manualMTU)
 	}
 	var tunOpts []tunnet.Option
-	if cc := os.Getenv("TELEPORT_TCP_CONGESTION_CONTROL"); cc != "" {
-		tunOpts = append(tunOpts, tunnet.WithCongestionControl(cc))
-		appLog.Info("TCP congestion control override requested", "cc", cc)
+	if p.tcpCongestionControl != "" {
+		tunOpts = append(tunOpts, tunnet.WithCongestionControl(p.tcpCongestionControl))
+		appLog.Info("TCP congestion control override requested", "cc", p.tcpCongestionControl)
 	}
 	tun, tunnelNet, err := tunnet.CreateNetTUN(deviceAddrs, dnsAddrs, initialMTU, tunOpts...)
 	if err != nil {

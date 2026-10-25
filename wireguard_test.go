@@ -159,6 +159,45 @@ func TestResolveConfiguredMTU(t *testing.T) {
 	}
 }
 
+func TestResolveTCPCongestionControl(t *testing.T) {
+	tests := []struct {
+		name      string
+		envVal    string
+		wantCC    string
+		wantErr   bool
+		errSubstr string
+	}{
+		{"empty string", "", "", false, ""},
+		{"whitespace only", "   ", "", false, ""},
+		{"valid reno", "reno", "reno", false, ""},
+		{"valid cubic", "cubic", "cubic", false, ""},
+		{"uppercase cubic", "CUBIC", "cubic", false, ""},
+		{"mixed case trimmed reno", "  Reno  ", "reno", false, ""},
+		{"unsupported bbr", "bbr", "", true, "unsupported TELEPORT_TCP_CONGESTION_CONTROL"},
+		{"unsupported other", "vegas", "", true, "unsupported TELEPORT_TCP_CONGESTION_CONTROL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveTCPCongestionControl(tt.envVal)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("resolveTCPCongestionControl(%q) succeeded, want error", tt.envVal)
+				}
+				if tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Fatalf("resolveTCPCongestionControl(%q) error = %q, want substr %q", tt.envVal, err.Error(), tt.errSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveTCPCongestionControl(%q) returned unexpected error: %v", tt.envVal, err)
+			}
+			if got != tt.wantCC {
+				t.Fatalf("resolveTCPCongestionControl(%q) = %q, want %q", tt.envVal, got, tt.wantCC)
+			}
+		})
+	}
+}
+
 func TestBuildConfig_MTU(t *testing.T) {
 	info := serverInfo{
 		WGPubKey:   "peer-pubkey",

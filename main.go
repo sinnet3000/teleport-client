@@ -28,18 +28,19 @@ const responsePollInterval = 600 * time.Millisecond
 
 // cliFlags holds the parsed and validated command-line configuration.
 type cliFlags struct {
-	invite           string
-	name             string
-	endpointOverride string
-	forceTurn        bool
-	printConfig      bool
-	socks5Addr       string
-	socks5User       string
-	socks5Pass       string
-	family           networkFamily
-	debug            bool
-	sessionFile      string
-	mtu              int
+	invite               string
+	name                 string
+	endpointOverride     string
+	forceTurn            bool
+	printConfig          bool
+	socks5Addr           string
+	socks5User           string
+	socks5Pass           string
+	family               networkFamily
+	debug                bool
+	sessionFile          string
+	mtu                  int
+	tcpCongestionControl string
 }
 
 // sessionResult is what establishSession produces: either a freshly granted
@@ -176,15 +177,6 @@ func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionR
 		return connectionAttemptResult{}, err
 	}
 
-	effectiveMTU := flags.mtu
-	if effectiveMTU == 0 {
-		if ep, err := net.ResolveUDPAddr("udp", endpoint); err == nil {
-			effectiveMTU = discoverPathMTU(ep)
-		} else {
-			effectiveMTU = fallbackMTU
-		}
-	}
-	conf := buildConfig(priv, port, endpoint, connResp.ServerInfo, connResp.DNSAddrs, connResp.ClientIP, effectiveMTU)
 	appLog.Info("endpoint selected", "endpoint", endpoint, "mode", endpointMode, "connection_attempt", attempt)
 	appLog.Debug("WireGuard peer configured", "public_key", connResp.ServerInfo.WGPubKey)
 	if session.Access != nil {
@@ -193,6 +185,15 @@ func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionR
 	}
 
 	if flags.printConfig {
+		effectiveMTU := flags.mtu
+		if effectiveMTU == 0 {
+			if ep, err := net.ResolveUDPAddr("udp", endpoint); err == nil {
+				effectiveMTU = discoverPathMTU(ep)
+			} else {
+				effectiveMTU = fallbackMTU
+			}
+		}
+		conf := buildConfig(priv, port, endpoint, connResp.ServerInfo, connResp.DNSAddrs, connResp.ClientIP, effectiveMTU)
 		fmt.Print(conf)
 		return connectionAttemptResult{printedConfig: true}, nil
 	}
@@ -200,19 +201,20 @@ func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionR
 	early.Stop()
 	tunnelStarted := time.Now()
 	err = runTunnel(ctx, tunnelParams{
-		priv:           priv,
-		port:           port,
-		endpoint:       endpoint,
-		connResp:       connResp,
-		stunSecret:     stunSecret,
-		sockets:        sockets,
-		nomination:     nomination,
-		socks5Addr:     flags.socks5Addr,
-		socks5Auth:     socks5Auth{user: flags.socks5User, pass: flags.socks5Pass},
-		debug:          flags.debug,
-		candidateQueue: candidateQueue,
-		candidateTypes: candidateTypes,
-		mtu:            flags.mtu,
+		priv:                 priv,
+		port:                 port,
+		endpoint:             endpoint,
+		connResp:             connResp,
+		stunSecret:           stunSecret,
+		sockets:              sockets,
+		nomination:           nomination,
+		socks5Addr:           flags.socks5Addr,
+		socks5Auth:           socks5Auth{user: flags.socks5User, pass: flags.socks5Pass},
+		debug:                flags.debug,
+		candidateQueue:       candidateQueue,
+		candidateTypes:       candidateTypes,
+		mtu:                  flags.mtu,
+		tcpCongestionControl: flags.tcpCongestionControl,
 	})
 	return connectionAttemptResult{
 		tunnelStarted:  true,
@@ -375,28 +377,25 @@ func parseFlags() cliFlags {
 		failUsage("%v", err)
 	}
 
-	if cc := os.Getenv("TELEPORT_TCP_CONGESTION_CONTROL"); cc != "" {
-		switch strings.ToLower(strings.TrimSpace(cc)) {
-		case "reno", "cubic", "bbr":
-			// valid
-		default:
-			failUsage("unsupported TELEPORT_TCP_CONGESTION_CONTROL %q; supported: reno, cubic, bbr", cc)
-		}
+	tcpCC, err := resolveTCPCongestionControl(os.Getenv("TELEPORT_TCP_CONGESTION_CONTROL"))
+	if err != nil {
+		failUsage("%v", err)
 	}
 
 	return cliFlags{
-		invite:           *invite,
-		name:             *name,
-		endpointOverride: *endpointOverride,
-		forceTurn:        *forceTurn,
-		printConfig:      *printConfig,
-		socks5Addr:       *socks5Addr,
-		socks5User:       *socks5User,
-		socks5Pass:       socks5PassValue,
-		family:           family,
-		debug:            *debug,
-		sessionFile:      *sessionFile,
-		mtu:              configuredMTU,
+		invite:               *invite,
+		name:                 *name,
+		endpointOverride:     *endpointOverride,
+		forceTurn:            *forceTurn,
+		printConfig:          *printConfig,
+		socks5Addr:           *socks5Addr,
+		socks5User:           *socks5User,
+		socks5Pass:           socks5PassValue,
+		family:               family,
+		debug:                *debug,
+		sessionFile:          *sessionFile,
+		mtu:                  configuredMTU,
+		tcpCongestionControl: tcpCC,
 	}
 }
 
