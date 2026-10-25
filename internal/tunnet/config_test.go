@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"testing"
 
+	"golang.zx2c4.com/wireguard/tun"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
@@ -162,6 +163,12 @@ func TestSetMTU(t *testing.T) {
 		t.Fatalf("initial MTU = %d (err=%v), want 1280", initialMTU, err)
 	}
 
+	// Drain initial EventUp enqueued during CreateNetTUN
+	select {
+	case <-dev.Events():
+	default:
+	}
+
 	// Update to 1420
 	if err := net.SetMTU(1420); err != nil {
 		t.Fatalf("net.SetMTU(1420) failed: %v", err)
@@ -175,12 +182,11 @@ func TestSetMTU(t *testing.T) {
 	// Verify EventMTUUpdate was sent on events channel
 	select {
 	case event := <-dev.Events():
-		// Note: CreateNetTUN sent EventUp during creation; subsequent event is EventMTUUpdate
-		if event != 4 && event != 1 { // 4 is EventMTUUpdate (1 << 2)
-			t.Logf("received event: %v", event)
+		if event != tun.EventMTUUpdate {
+			t.Fatalf("received event %v, want EventMTUUpdate (%v)", event, tun.EventMTUUpdate)
 		}
 	default:
-		t.Fatal("expected event on dev.Events() after SetMTU")
+		t.Fatal("expected EventMTUUpdate on dev.Events() after SetMTU")
 	}
 }
 

@@ -135,9 +135,15 @@ func runUDPEchoPinger(ctx context.Context, tunnelNet *tunnet.Net, secret string,
 				}
 				p, err := buildPaddedEchoPayload(secretHash, fmt.Sprint(requestID), 3000, target, ipHeaderLen)
 				if err == nil {
-					payload = p
-					targetMTU = target
-					probing = true
+					// Temporarily allow the probe datagram size on the netstack without fragmentation
+					if err := tunnelNet.SetMTU(target); err == nil {
+						payload = p
+						targetMTU = target
+						probing = true
+					} else {
+						appLog.Debug("failed to set probe MTU on stack", "probe_mtu", target, "error", err)
+						prober.RecordProbeResult(target, false)
+					}
 				}
 			}
 		}
@@ -157,6 +163,15 @@ func runUDPEchoPinger(ctx context.Context, tunnelNet *tunnet.Net, secret string,
 
 		started := time.Now()
 		if _, err := conn.Write(payload); err != nil {
+			if probing {
+				appLog.Debug("UDP echo MTU probe write failed", "request_id", requestID, "probe_mtu", targetMTU, "error", err)
+				_, confirmedMTU, done := prober.RecordProbeResult(targetMTU, false)
+				_ = tunnelNet.SetMTU(confirmedMTU)
+				if done {
+					appLog.Info("path MTU search complete", "locked_mtu", confirmedMTU, "failed_probe", targetMTU)
+				}
+				continue
+			}
 			return fmt.Errorf("write UDP echo request %d: %w", requestID, err)
 		}
 		if probing {
@@ -180,10 +195,11 @@ func runUDPEchoPinger(ctx context.Context, tunnelNet *tunnet.Net, secret string,
 
 		if probing {
 			mtuChanged, confirmedMTU, done := prober.RecordProbeResult(targetMTU, matched)
+			// Lock stack to confirmed MTU (advances if matched, reverts if timed out)
+			_ = tunnelNet.SetMTU(confirmedMTU)
 			if matched {
 				rtt := time.Since(started)
 				if mtuChanged {
-					_ = tunnelNet.SetMTU(confirmedMTU)
 					appLog.Info("path MTU probe confirmed", "probe_mtu", targetMTU, "locked_mtu", confirmedMTU, "rtt", rtt.Round(time.Millisecond))
 				}
 				if done {

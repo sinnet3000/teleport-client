@@ -159,13 +159,20 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 	echoStopped := make(chan error, 1)
 	healthEvents := make(chan udpEchoHealthEvent)
 	maxTargetMTU := maxInternetWireMTU - wireGuardOverhead(endpointAddr)
+	if routeMTU := discoverPathMTU(endpointAddr); routeMTU < maxTargetMTU {
+		maxTargetMTU = routeMTU
+	}
 	manualMTU := p.mtu
 	if manualMTU == 0 {
 		if envMTU, err := resolveConfiguredMTU(0, os.Getenv("TELEPORT_MTU")); err == nil && envMTU > 0 {
 			manualMTU = envMTU
 		}
 	}
-	prober := newPeerMTUProber(mtu, maxTargetMTU, manualMTU)
+	initialMTU := baseTunnelMTU
+	if manualMTU > 0 {
+		initialMTU = manualMTU
+	}
+	prober := newPeerMTUProber(initialMTU, maxTargetMTU, manualMTU)
 	workerWG.Add(1)
 	go func() {
 		defer workerWG.Done()

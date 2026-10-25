@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -10,7 +11,7 @@ func TestBuildPaddedEchoPayloadExactSizing(t *testing.T) {
 	const ipHeaderLen = 20 // IPv4
 
 	for _, targetPacketSize := range []int{1280, 1360, 1400, 1420, 1440} {
-		t.Run(string(rune(targetPacketSize)), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%d", targetPacketSize), func(t *testing.T) {
 			payload, err := buildPaddedEchoPayload(secretHash, "req-42", 3000, targetPacketSize, ipHeaderLen)
 			if err != nil {
 				t.Fatalf("buildPaddedEchoPayload failed: %v", err)
