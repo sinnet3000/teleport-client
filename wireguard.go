@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -8,6 +9,8 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -254,23 +257,27 @@ func (b *stunBind) BatchSize() int {
 	return 1
 }
 
-// wgOverheadBytes is the flat per-packet overhead WireGuard adds (message
-// type, key index, counter, Poly1305 tag), matching the constant wg-quick's
-// auto_mtu subtracts regardless of the outer IP version.
-const wgOverheadBytes = 80
+// wgIPv4OverheadBytes is the encapsulation overhead for WireGuard over outer IPv4:
+// 20 bytes (IPv4 header) + 8 bytes (UDP header) + 32 bytes (WireGuard header & Poly1305 MAC) = 60.
+const wgIPv4OverheadBytes = 60
+
+// wgIPv6OverheadBytes is the encapsulation overhead for WireGuard over outer IPv6:
+// 40 bytes (IPv6 header) + 8 bytes (UDP header) + 32 bytes (WireGuard header & Poly1305 MAC) = 80.
+const wgIPv6OverheadBytes = 80
 
 // fallbackMTU is used when path MTU discovery fails outright (dial error,
 // no interface listing, no matching interface).
 const fallbackMTU = 1420
 
-// minTunnelMTU is the IPv6 minimum MTU. A discovered tunnel MTU is clamped
-// up to this floor rather than discarded, since a genuinely small egress
+// minTunnelMTU is the IPv6 minimum MTU (RFC 8200). A discovered tunnel MTU is
+// clamped up to this floor rather than discarded, since a genuinely small egress
 // MTU (e.g. PPPoE) must still be respected to avoid physical fragmentation.
 const minTunnelMTU = 1280
 
-// maxTunnelMTU caps the discovered MTU; a local interface's jumbo MTU (e.g.
-// a cloud VCN NIC) doesn't reflect the real internet path and blackholes.
-const maxTunnelMTU = fallbackMTU
+// maxInternetWireMTU is the standard maximum internet MTU without jumbo frames.
+// A local interface's jumbo MTU (e.g. 9000 on a cloud VCN or 16384 on Mac lo0/utun)
+// cannot safely be used across the public internet without fragmentation/blackholes.
+const maxInternetWireMTU = 1500
 
 // minConfiguredMTU is the IPv6 minimum MTU (RFC 8200). A configured tunnel MTU
 // cannot be smaller without breaking IPv6 guarantees.
@@ -278,6 +285,15 @@ const minConfiguredMTU = 1280
 
 // maxConfiguredMTU is the standard maximum internet MTU without jumbo frames.
 const maxConfiguredMTU = 1500
+
+// wireGuardOverhead returns the per-packet encapsulation overhead for endpoint:
+// 80 bytes for outer IPv6, 60 bytes for outer IPv4.
+func wireGuardOverhead(endpoint *net.UDPAddr) int {
+	if endpoint != nil && endpoint.IP != nil && endpoint.IP.To4() == nil {
+		return wgIPv6OverheadBytes
+	}
+	return wgIPv4OverheadBytes
+}
 
 // resolveConfiguredMTU returns the user-configured MTU override from the CLI
 // flag or TELEPORT_MTU environment variable. If neither is specified, it returns
@@ -306,19 +322,91 @@ func resolveConfiguredMTU(cliMTU int, envMTU string) (int, error) {
 	return 0, nil
 }
 
-// discoverPathMTU mirrors wg-quick's auto_mtu: it finds the MTU of the local
-// interface the OS would use to reach endpoint, then subtracts WireGuard's
-// per-packet overhead. Unlike wg-quick it doesn't shell out to `ip route
-// get` / `route get`; instead it "connects" a UDP socket to the endpoint
-// (no packets are sent) and reads back the OS-selected local address, then
-// matches that address against net.Interfaces() to find the egress
-// interface's MTU, clamped to [minTunnelMTU, maxTunnelMTU]. Falls back to
-// fallbackMTU only if discovery fails outright.
+// parseDarwinRouteMTU parses the route MTU from `route -n get` output on BSD/Darwin.
+// The output contains a metrics header line with an `mtu` column followed by values.
+func parseDarwinRouteMTU(output string) int {
+	lines := strings.Split(output, "\n")
+	mtuCol := -1
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if mtuCol == -1 {
+			for idx, f := range fields {
+				if f == "mtu" {
+					mtuCol = idx
+					break
+				}
+			}
+			continue
+		}
+		if len(fields) > mtuCol {
+			if val, err := strconv.Atoi(fields[mtuCol]); err == nil && val > 0 {
+				return val
+			}
+		}
+		break
+	}
+	return 0
+}
+
+// parseLinuxRouteMTU parses the route MTU from `ip route get` output on Linux.
+// When an MTU is set on the route, it contains `mtu <number>`.
+func parseLinuxRouteMTU(output string) int {
+	fields := strings.Fields(output)
+	for i := 0; i < len(fields)-1; i++ {
+		if fields[i] == "mtu" {
+			if v, err := strconv.Atoi(fields[i+1]); err == nil && v > 0 {
+				return v
+			}
+		}
+	}
+	return 0
+}
+
+// queryRouteMTU queries the kernel routing table for a route-specific MTU toward
+// target IP (e.g. 1472 bytes set by IPv6 Router Advertisements on macOS).
+func queryRouteMTU(ctx context.Context, ip net.IP) int {
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() {
+		return 0
+	}
+
+	cmdCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+
+	ipStr := ip.String()
+	switch runtime.GOOS {
+	case "darwin", "freebsd", "openbsd", "netbsd":
+		familyArg := "-inet"
+		if ip.To4() == nil {
+			familyArg = "-inet6"
+		}
+		out, err := exec.CommandContext(cmdCtx, "route", "-n", "get", familyArg, ipStr).Output()
+		if err == nil {
+			return parseDarwinRouteMTU(string(out))
+		}
+	case "linux":
+		out, err := exec.CommandContext(cmdCtx, "ip", "route", "get", ipStr).Output()
+		if err == nil {
+			return parseLinuxRouteMTU(string(out))
+		}
+	}
+	return 0
+}
+
+// discoverPathMTU determines the optimal tunnel MTU for endpoint. It inspects
+// the route-level MTU (e.g. IPv6 Router Advertisement limits) and physical egress
+// interface MTU, applies the exact outer family encapsulation overhead (60 bytes
+// for IPv4 vs 80 bytes for IPv6), and clamps to [minTunnelMTU, maxInternetWireMTU - overhead].
+// Falls back to fallbackMTU only if discovery fails outright.
 func discoverPathMTU(endpoint *net.UDPAddr) int {
 	if endpoint == nil || endpoint.IP == nil || endpoint.IP.IsUnspecified() || endpoint.Port <= 0 || endpoint.Port > 65535 {
 		appLog.Debug("path MTU discovery: invalid endpoint, using fallback", "endpoint", endpoint, "mtu", fallbackMTU)
 		return fallbackMTU
 	}
+
+	overhead := wireGuardOverhead(endpoint)
 
 	udpConn, err := net.DialUDP("udp", nil, endpoint)
 	if err != nil {
@@ -329,11 +417,28 @@ func discoverPathMTU(endpoint *net.UDPAddr) int {
 
 	localIP := udpConn.LocalAddr().(*net.UDPAddr).IP
 
+	routeMTU := queryRouteMTU(context.Background(), endpoint.IP)
+	if routeMTU > 0 {
+		appLog.Debug("path MTU discovery: route MTU queried", "endpoint", endpoint.IP.String(), "route_mtu", routeMTU)
+	}
+
 	ifaces, err := net.Interfaces()
 	if err != nil {
+		if routeMTU > 0 {
+			wireMTU := routeMTU
+			if wireMTU > maxInternetWireMTU {
+				wireMTU = maxInternetWireMTU
+			}
+			mtu := wireMTU - overhead
+			if mtu < minTunnelMTU {
+				mtu = minTunnelMTU
+			}
+			return mtu
+		}
 		appLog.Debug("path MTU discovery: listing interfaces failed, using fallback", "error", err, "mtu", fallbackMTU)
 		return fallbackMTU
 	}
+
 	for _, iface := range ifaces {
 		addrs, err := iface.Addrs()
 		if err != nil {
@@ -354,17 +459,44 @@ func discoverPathMTU(endpoint *net.UDPAddr) int {
 			if !ip.Equal(localIP) {
 				continue
 			}
-			mtu := iface.MTU - wgOverheadBytes
+
+			wireMTU := iface.MTU
+			if routeMTU > 0 && routeMTU < wireMTU {
+				wireMTU = routeMTU
+			}
+			if wireMTU > maxInternetWireMTU {
+				wireMTU = maxInternetWireMTU
+			}
+
+			mtu := wireMTU - overhead
 			if mtu < minTunnelMTU {
 				mtu = minTunnelMTU
 			}
-			if mtu > maxTunnelMTU {
-				mtu = maxTunnelMTU
-			}
-			appLog.Debug("path MTU discovery: resolved", "interface", iface.Name, "interface_mtu", iface.MTU, "tunnel_mtu", mtu)
+			appLog.Debug("path MTU discovery: resolved",
+				"interface", iface.Name,
+				"interface_mtu", iface.MTU,
+				"route_mtu", routeMTU,
+				"wire_mtu", wireMTU,
+				"overhead", overhead,
+				"tunnel_mtu", mtu,
+			)
 			return mtu
 		}
 	}
+
+	if routeMTU > 0 {
+		wireMTU := routeMTU
+		if wireMTU > maxInternetWireMTU {
+			wireMTU = maxInternetWireMTU
+		}
+		mtu := wireMTU - overhead
+		if mtu < minTunnelMTU {
+			mtu = minTunnelMTU
+		}
+		appLog.Debug("path MTU discovery: resolved via route MTU", "route_mtu", routeMTU, "tunnel_mtu", mtu)
+		return mtu
+	}
+
 	appLog.Debug("path MTU discovery: no matching interface found, using fallback", "local_ip", localIP.String(), "mtu", fallbackMTU)
 	return fallbackMTU
 }

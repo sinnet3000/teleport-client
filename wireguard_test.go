@@ -177,3 +177,132 @@ func TestBuildConfig_MTU(t *testing.T) {
 	}
 }
 
+func TestWireGuardOverhead(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint *net.UDPAddr
+		want     int
+	}{
+		{"nil", nil, 60},
+		{"nil IP", &net.UDPAddr{Port: 51820}, 60},
+		{"IPv4 endpoint", &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 51820}, 60},
+		{"IPv4 loopback", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 51820}, 60},
+		{"IPv6 endpoint", &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 51820}, 80},
+		{"IPv6 loopback", &net.UDPAddr{IP: net.ParseIP("::1"), Port: 51820}, 80},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := wireGuardOverhead(tt.endpoint); got != tt.want {
+				t.Fatalf("wireGuardOverhead(%v) = %d, want %d", tt.endpoint, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseDarwinRouteMTU(t *testing.T) {
+	const sampleIPv6RA = `   route to: 2001:4860:4860::8888
+destination: ::
+       mask: default
+    gateway: fe80::1%en0
+  interface: en0
+      flags: <UP,GATEWAY,DONE,PRCLONING,GLOBAL>
+ recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+       0         0         0         0         0         0      1472         0 `
+
+	if got := parseDarwinRouteMTU(sampleIPv6RA); got != 1472 {
+		t.Fatalf("parseDarwinRouteMTU(sampleIPv6RA) = %d, want 1472", got)
+	}
+
+	const sampleIPv4 = `   route to: 1.1.1.1
+destination: default
+       mask: default
+    gateway: 192.168.100.1
+  interface: en0
+      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>
+ recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+       0         0         0         0         0         0      1500         0 `
+
+	if got := parseDarwinRouteMTU(sampleIPv4); got != 1500 {
+		t.Fatalf("parseDarwinRouteMTU(sampleIPv4) = %d, want 1500", got)
+	}
+
+	const sampleNoMTU = `   route to: 10.0.0.1
+destination: 10.0.0.1
+  interface: en0
+ recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+       0         0         0         0         0         0         0         0 `
+
+	if got := parseDarwinRouteMTU(sampleNoMTU); got != 0 {
+		t.Fatalf("parseDarwinRouteMTU(sampleNoMTU) = %d, want 0", got)
+	}
+
+	if got := parseDarwinRouteMTU("garbage output\nno table here\n"); got != 0 {
+		t.Fatalf("parseDarwinRouteMTU(garbage) = %d, want 0", got)
+	}
+}
+
+func TestParseLinuxRouteMTU(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   int
+	}{
+		{
+			name:   "with mtu",
+			output: "1.1.1.1 via 10.0.0.1 dev enp0s6 src 10.0.0.248 mtu 1472 uid 1001\n    cache",
+			want:   1472,
+		},
+		{
+			name:   "standard without mtu",
+			output: "1.1.1.1 via 10.0.0.1 dev enp0s6 src 10.0.0.248 uid 1001\n    cache",
+			want:   0,
+		},
+		{
+			name:   "ipv6 with mtu",
+			output: "2606:4700::1 via fe80::1 dev eth0 metric 100 mtu 1380 pref medium",
+			want:   1380,
+		},
+		{
+			name:   "empty",
+			output: "",
+			want:   0,
+		},
+		{
+			name:   "mtu without value",
+			output: "1.1.1.1 dev eth0 mtu",
+			want:   0,
+		},
+		{
+			name:   "mtu with invalid value",
+			output: "1.1.1.1 dev eth0 mtu notanumber",
+			want:   0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseLinuxRouteMTU(tt.output); got != tt.want {
+				t.Fatalf("parseLinuxRouteMTU(%q) = %d, want %d", tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDiscoverPathMTU_LiveRouteResolution(t *testing.T) {
+	// IPv4 destination (e.g. Cloudflare DNS)
+	v4, err := net.ResolveUDPAddr("udp", "1.1.1.1:51820")
+	if err == nil {
+		mtu := discoverPathMTU(v4)
+		if mtu < minTunnelMTU || mtu > 1440 {
+			t.Fatalf("discoverPathMTU(1.1.1.1) = %d, want between %d and 1440", mtu, minTunnelMTU)
+		}
+	}
+
+	// IPv6 destination (e.g. Google DNS)
+	v6, err := net.ResolveUDPAddr("udp", "[2001:4860:4860::8888]:51820")
+	if err == nil {
+		mtu := discoverPathMTU(v6)
+		if mtu < minTunnelMTU || mtu > 1420 {
+			t.Fatalf("discoverPathMTU(2001:4860:4860::8888) = %d, want between %d and 1420", mtu, minTunnelMTU)
+		}
+	}
+}
