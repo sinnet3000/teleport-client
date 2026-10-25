@@ -25,7 +25,9 @@ local SOCKS5 proxy without routing the entire host through the tunnel.
 - `api.go` and `session.go`: Teleport API exchange and local session state.
 - `stun.go` and `nomination.go`: STUN mechanics and Teleport endpoint selection.
 - `wireguard.go` and `socks5.go`: tunnel transport and local proxy integration.
-- `*_test.go`: unit tests for the corresponding protocol components.
+- `peermtu.go` and `udpecho.go`: route MTU discovery and RFC 8899 datagram PLPMTUD probing.
+- `internal/tunnet`: vendored netstack wrapper with tailored TCP buffer scaling and cubic congestion control.
+- `*_test.go`: unit tests for protocol and transport components.
 - `wireguard_integration_test.go`: offline integration tests against a real wireguard-go device and `wg` CLI (build tag `integration`).
 
 ## Requirements
@@ -149,22 +151,39 @@ teleport-client -4 --session-file ~/.config/teleport-client/session.json
 teleport-client -6 --session-file ~/.config/teleport-client/session.json
 ```
 
+## Path MTU discovery and clamping
+
+WireGuard encapsulation adds transport overhead to every packet (60 bytes for IPv4, 80 bytes for IPv6). If the tunnel transmits frames larger than the underlying link MTU, packets are dropped or blackholed without ICMP feedback. Networks with non-standard MTUs (such as 1472-byte IPv6 router advertisements, 1492-byte PPPoE links, or nested VPNs) require MTU clamping to prevent connection stalls.
+
+teleport-client manages tunnel MTU through three mechanisms:
+
+1. Route-aware path discovery: When an endpoint is selected, the client queries the local routing table (`route -n get` on macOS and BSD, or `ip route get` on Linux) to detect the outbound interface MTU. It subtracts encapsulation overhead to calculate the maximum safe tunnel MTU ceiling.
+2. Active datagram probing (RFC 8899 DPLPMTUD): To guarantee immediate connectivity, the client starts the tunnel with a baseline MTU of 1280 bytes. In the background, it sends rate-limited UDP echo probes padded to candidate milestone sizes (1360, 1400, 1420, and 1440 bytes, capped at the discovered route MTU ceiling) to the UniFi console. When a milestone probe receives a valid echo response, the client raises the in-process netstack MTU dynamically without resetting active connections.
+3. Explicit MTU configuration: You can override automatic probing by specifying `--mtu <bytes>` or setting the `TELEPORT_MTU` environment variable (allowed range: 1280 to 1500). When manually configured, dynamic probing is disabled and the requested MTU is locked.
+
+## TCP tuning and congestion control
+
+The client runs an in-process gVisor netstack (`internal/tunnet`) for userspace networking. The network stack includes optimizations for high bandwidth-delay product links:
+
+- Buffer sizing: Socket buffers scale up to 6 MiB for sending and 8 MiB for receiving, matching modern VPN profiles and preventing window stalls under high-throughput transfers.
+- Congestion control: Cubic congestion control is enabled by default. You can switch to Reno by setting `export TELEPORT_TCP_CONGESTION_CONTROL=reno`. Invalid algorithm names fail immediately at startup with an explanatory error.
+
 ## Useful flags
 
 - `--name <name>`: set the Teleport client name.
 - `--debug`: enable debug logging.
 - `--endpoint <host:port>`: force the WireGuard endpoint.
-- `--mtu <bytes>`: set the tunnel MTU (1280-1500; defaults to path discovery or
-  `TELEPORT_MTU`). Use this to clamp MTU for restricted transit, PPPoE, or nested VPNs.
+- `--mtu <bytes>`: set the tunnel MTU (1280 to 1500; defaults to automatic path discovery or `TELEPORT_MTU`). Use this to clamp MTU for restricted transit, PPPoE, or nested VPNs.
 - `--turn`: require and use a console TURN relay.
 - `--print-config`: print the WireGuard configuration and exit.
-- `--socks5 <host:port>`: set the SOCKS5 listen address (default
-  `127.0.0.1:1080`).
-- `--socks5-user <name>` / `--socks5-pass <secret>`: require SOCKS5
-  username/password authentication (both required; the password may come from
-  `TELEPORT_SOCKS5_PASS` when a user is set; default is none). Values are
-  limited to 255 bytes (RFC 1929). The password flag is visible in process
-  listings.
+- `--socks5 <host:port>`: set the SOCKS5 listen address (default `127.0.0.1:1080`).
+- `--socks5-user <name>` / `--socks5-pass <secret>`: require SOCKS5 username/password authentication (both required; the password may come from `TELEPORT_SOCKS5_PASS` when a user is set; default is none). Values are limited to 255 bytes (RFC 1929). The password flag is visible in process listings.
+
+## Environment variables
+
+- `TELEPORT_MTU`: set the tunnel MTU fallback if `--mtu` is omitted (1280 to 1500).
+- `TELEPORT_SOCKS5_PASS`: supply the SOCKS5 proxy password when `--socks5-user` is set.
+- `TELEPORT_TCP_CONGESTION_CONTROL`: select the userspace TCP congestion control algorithm (`cubic` by default, or `reno`).
 
 ## Run as a service
 
