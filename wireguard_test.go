@@ -268,6 +268,11 @@ func TestParseLinuxRouteMTU(t *testing.T) {
 			want:   0,
 		},
 		{
+			name:   "mtu lock",
+			output: "1.1.1.1 via 10.0.0.1 dev eth0 mtu lock 1400",
+			want:   1400,
+		},
+		{
 			name:   "mtu without value",
 			output: "1.1.1.1 dev eth0 mtu",
 			want:   0,
@@ -282,6 +287,32 @@ func TestParseLinuxRouteMTU(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := parseLinuxRouteMTU(tt.output); got != tt.want {
 				t.Fatalf("parseLinuxRouteMTU(%q) = %d, want %d", tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestComputeTunnelMTU(t *testing.T) {
+	tests := []struct {
+		name     string
+		wireMTU  int
+		overhead int
+		want     int
+	}{
+		{"standard IPv4 1500", 1500, 60, 1440},
+		{"standard IPv6 1500", 1500, 80, 1420},
+		{"megacable IPv6 1472", 1472, 80, 1392},
+		{"pppoe IPv4 1492", 1492, 60, 1432},
+		{"pppoe IPv6 1492", 1492, 80, 1412},
+		{"jumbo 9000 capped at 1500 IPv4", 9000, 60, 1440},
+		{"jumbo 16384 capped at 1500 IPv6", 16384, 80, 1420},
+		{"narrow 1300 IPv6 clamped up to 1280", 1300, 80, 1280},
+		{"sub-minimum 1000 clamped to 1280", 1000, 60, 1280},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := computeTunnelMTU(tt.wireMTU, tt.overhead); got != tt.want {
+				t.Fatalf("computeTunnelMTU(%d, %d) = %d, want %d", tt.wireMTU, tt.overhead, got, tt.want)
 			}
 		})
 	}

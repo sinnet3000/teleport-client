@@ -375,6 +375,15 @@ func parseFlags() cliFlags {
 		failUsage("%v", err)
 	}
 
+	if cc := os.Getenv("TELEPORT_TCP_CONGESTION_CONTROL"); cc != "" {
+		switch strings.ToLower(strings.TrimSpace(cc)) {
+		case "reno", "cubic", "bbr":
+			// valid
+		default:
+			failUsage("unsupported TELEPORT_TCP_CONGESTION_CONTROL %q; supported: reno, cubic, bbr", cc)
+		}
+	}
+
 	return cliFlags{
 		invite:           *invite,
 		name:             *name,

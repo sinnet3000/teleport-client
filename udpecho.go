@@ -170,6 +170,11 @@ func runUDPEchoPinger(ctx context.Context, tunnelNet *tunnet.Net, secret string,
 				if done {
 					appLog.Info("path MTU search complete", "locked_mtu", confirmedMTU, "failed_probe", targetMTU)
 				}
+				select {
+				case <-time.After(2 * time.Second):
+				case <-ctx.Done():
+					return nil
+				}
 				continue
 			}
 			return fmt.Errorf("write UDP echo request %d: %w", requestID, err)
@@ -215,7 +220,7 @@ func runUDPEchoPinger(ctx context.Context, tunnelNet *tunnet.Net, secret string,
 		}
 
 		event, firstSuccess := health.observe(matched)
-		if event == udpEchoUnhealthy && prober != nil {
+		if event == udpEchoUnhealthy && prober != nil && prober.State() != dplpmtudStateDisabled {
 			prober.Reset()
 			_ = tunnelNet.SetMTU(baseTunnelMTU)
 			appLog.Warn("sustained echo loss; path MTU reset to safe baseline", "base_mtu", baseTunnelMTU)
@@ -231,6 +236,9 @@ func runUDPEchoPinger(ctx context.Context, tunnelNet *tunnet.Net, secret string,
 			now := time.Now()
 			rtt := now.Sub(started)
 			if !probing {
+				if prober != nil {
+					prober.Arm()
+				}
 				appLog.Debug("received UDP echo response", "request_id", requestID, "rtt", rtt.Round(time.Millisecond))
 			}
 			if firstSuccess {

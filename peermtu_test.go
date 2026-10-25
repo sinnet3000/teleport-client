@@ -154,8 +154,15 @@ func TestPeerMTUProberReset(t *testing.T) {
 	if prober.State() != dplpmtudStateSearching {
 		t.Fatalf("after reset, state = %v, want SEARCHING", prober.State())
 	}
+	// Before arming (baseline echo recovery), NextProbeMTU should return false to prevent probe burn
+	if _, ok := prober.NextProbeMTU(); ok {
+		t.Fatal("NextProbeMTU should return false while unconfirmed after reset")
+	}
+
+	// Arm after baseline echo recovers
+	prober.Arm()
 	target, ok := prober.NextProbeMTU()
 	if !ok || target != 1360 {
-		t.Fatalf("after reset, first probe = %d, want 1360", target)
+		t.Fatalf("after reset and arm, first probe = %d, want 1360", target)
 	}
 }

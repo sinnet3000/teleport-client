@@ -352,17 +352,34 @@ func parseDarwinRouteMTU(output string) int {
 }
 
 // parseLinuxRouteMTU parses the route MTU from `ip route get` output on Linux.
-// When an MTU is set on the route, it contains `mtu <number>`.
+// When an MTU is set on the route, it contains `mtu <number>` or `mtu lock <number>`.
 func parseLinuxRouteMTU(output string) int {
 	fields := strings.Fields(output)
 	for i := 0; i < len(fields)-1; i++ {
 		if fields[i] == "mtu" {
-			if v, err := strconv.Atoi(fields[i+1]); err == nil && v > 0 {
+			valIdx := i + 1
+			if fields[valIdx] == "lock" && valIdx+1 < len(fields) {
+				valIdx++
+			}
+			if v, err := strconv.Atoi(fields[valIdx]); err == nil && v > 0 {
 				return v
 			}
 		}
 	}
 	return 0
+}
+
+// computeTunnelMTU clamps wireMTU to maxInternetWireMTU, subtracts encapsulation overhead,
+// and enforces minTunnelMTU.
+func computeTunnelMTU(wireMTU, overhead int) int {
+	if wireMTU > maxInternetWireMTU {
+		wireMTU = maxInternetWireMTU
+	}
+	mtu := wireMTU - overhead
+	if mtu < minTunnelMTU {
+		mtu = minTunnelMTU
+	}
+	return mtu
 }
 
 // queryRouteMTU queries the kernel routing table for a route-specific MTU toward
@@ -425,15 +442,7 @@ func discoverPathMTU(endpoint *net.UDPAddr) int {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		if routeMTU > 0 {
-			wireMTU := routeMTU
-			if wireMTU > maxInternetWireMTU {
-				wireMTU = maxInternetWireMTU
-			}
-			mtu := wireMTU - overhead
-			if mtu < minTunnelMTU {
-				mtu = minTunnelMTU
-			}
-			return mtu
+			return computeTunnelMTU(routeMTU, overhead)
 		}
 		appLog.Debug("path MTU discovery: listing interfaces failed, using fallback", "error", err, "mtu", fallbackMTU)
 		return fallbackMTU
@@ -464,14 +473,7 @@ func discoverPathMTU(endpoint *net.UDPAddr) int {
 			if routeMTU > 0 && routeMTU < wireMTU {
 				wireMTU = routeMTU
 			}
-			if wireMTU > maxInternetWireMTU {
-				wireMTU = maxInternetWireMTU
-			}
-
-			mtu := wireMTU - overhead
-			if mtu < minTunnelMTU {
-				mtu = minTunnelMTU
-			}
+			mtu := computeTunnelMTU(wireMTU, overhead)
 			appLog.Debug("path MTU discovery: resolved",
 				"interface", iface.Name,
 				"interface_mtu", iface.MTU,
@@ -485,14 +487,7 @@ func discoverPathMTU(endpoint *net.UDPAddr) int {
 	}
 
 	if routeMTU > 0 {
-		wireMTU := routeMTU
-		if wireMTU > maxInternetWireMTU {
-			wireMTU = maxInternetWireMTU
-		}
-		mtu := wireMTU - overhead
-		if mtu < minTunnelMTU {
-			mtu = minTunnelMTU
-		}
+		mtu := computeTunnelMTU(routeMTU, overhead)
 		appLog.Debug("path MTU discovery: resolved via route MTU", "route_mtu", routeMTU, "tunnel_mtu", mtu)
 		return mtu
 	}

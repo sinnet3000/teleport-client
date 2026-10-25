@@ -110,24 +110,22 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 		}
 	}
 
-	mtu := p.mtu
-	if mtu == 0 {
-		if envMTU, err := resolveConfiguredMTU(0, os.Getenv("TELEPORT_MTU")); err == nil && envMTU > 0 {
-			mtu = envMTU
-		}
-	}
-	if mtu == 0 {
-		mtu = discoverPathMTU(endpointAddr)
-		appLog.Info("path MTU discovered", "endpoint", endpointAddr.String(), "mtu", mtu)
+	manualMTU := p.mtu
+	initialMTU := manualMTU
+	maxTargetMTU := manualMTU
+	if manualMTU == 0 {
+		maxTargetMTU = discoverPathMTU(endpointAddr)
+		initialMTU = baseTunnelMTU
+		appLog.Info("path MTU auto-probing enabled", "baseline_mtu", initialMTU, "target_ceiling", maxTargetMTU)
 	} else {
-		appLog.Info("path MTU configured", "endpoint", endpointAddr.String(), "mtu", mtu)
+		appLog.Info("path MTU configured", "endpoint", endpointAddr.String(), "mtu", manualMTU)
 	}
 	var tunOpts []tunnet.Option
 	if cc := os.Getenv("TELEPORT_TCP_CONGESTION_CONTROL"); cc != "" {
 		tunOpts = append(tunOpts, tunnet.WithCongestionControl(cc))
 		appLog.Info("TCP congestion control override requested", "cc", cc)
 	}
-	tun, tunnelNet, err := tunnet.CreateNetTUN(deviceAddrs, dnsAddrs, mtu, tunOpts...)
+	tun, tunnelNet, err := tunnet.CreateNetTUN(deviceAddrs, dnsAddrs, initialMTU, tunOpts...)
 	if err != nil {
 		return err
 	}
@@ -158,20 +156,6 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 	}()
 	echoStopped := make(chan error, 1)
 	healthEvents := make(chan udpEchoHealthEvent)
-	maxTargetMTU := maxInternetWireMTU - wireGuardOverhead(endpointAddr)
-	if routeMTU := discoverPathMTU(endpointAddr); routeMTU < maxTargetMTU {
-		maxTargetMTU = routeMTU
-	}
-	manualMTU := p.mtu
-	if manualMTU == 0 {
-		if envMTU, err := resolveConfiguredMTU(0, os.Getenv("TELEPORT_MTU")); err == nil && envMTU > 0 {
-			manualMTU = envMTU
-		}
-	}
-	initialMTU := baseTunnelMTU
-	if manualMTU > 0 {
-		initialMTU = manualMTU
-	}
 	prober := newPeerMTUProber(initialMTU, maxTargetMTU, manualMTU)
 	workerWG.Add(1)
 	go func() {

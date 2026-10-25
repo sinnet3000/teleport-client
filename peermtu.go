@@ -62,6 +62,7 @@ type peerMTUProber struct {
 	maxTargetMTU   int
 	failedAttempts int
 	manualOverride bool
+	armed          bool
 }
 
 // newPeerMTUProber creates a new RFC 8899 prober. If manualMTU > 0, probing is disabled
@@ -111,7 +112,15 @@ func newPeerMTUProber(initialMTU, maxTargetMTU int, manualMTU int) *peerMTUProbe
 		currentIndex: startIdx,
 		confirmedMTU: confirmed,
 		maxTargetMTU: maxTargetMTU,
+		armed:        true,
 	}
+}
+
+// Arm enables milestone probing after a baseline echo check succeeds.
+func (p *peerMTUProber) Arm() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.armed = true
 }
 
 // NextProbeMTU returns the next milestone to probe and true, or (0, false) if no further
@@ -120,7 +129,7 @@ func (p *peerMTUProber) NextProbeMTU() (int, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.state != dplpmtudStateSearching || p.currentIndex >= len(p.milestones) {
+	if !p.armed || p.state != dplpmtudStateSearching || p.currentIndex >= len(p.milestones) {
 		return 0, false
 	}
 	return p.milestones[p.currentIndex], true
@@ -192,6 +201,7 @@ func (p *peerMTUProber) Reset() {
 	p.confirmedMTU = baseTunnelMTU
 	p.currentIndex = 0
 	p.failedAttempts = 0
+	p.armed = false
 }
 
 type echoProbePayload struct {
