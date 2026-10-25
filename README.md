@@ -154,6 +154,8 @@ teleport-client -6 --session-file ~/.config/teleport-client/session.json
 - `--name <name>`: set the Teleport client name.
 - `--debug`: enable debug logging.
 - `--endpoint <host:port>`: force the WireGuard endpoint.
+- `--mtu <bytes>`: set the tunnel MTU (1280-1500; defaults to path discovery or
+  `TELEPORT_MTU`). Use this to clamp MTU for restricted transit, PPPoE, or nested VPNs.
 - `--turn`: require and use a console TURN relay.
 - `--print-config`: print the WireGuard configuration and exit.
 - `--socks5 <host:port>`: set the SOCKS5 listen address (default

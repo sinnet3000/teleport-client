@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -271,6 +272,40 @@ const minTunnelMTU = 1280
 // a cloud VCN NIC) doesn't reflect the real internet path and blackholes.
 const maxTunnelMTU = fallbackMTU
 
+// minConfiguredMTU is the IPv6 minimum MTU (RFC 8200). A configured tunnel MTU
+// cannot be smaller without breaking IPv6 guarantees.
+const minConfiguredMTU = 1280
+
+// maxConfiguredMTU is the standard maximum internet MTU without jumbo frames.
+const maxConfiguredMTU = 1500
+
+// resolveConfiguredMTU returns the user-configured MTU override from the CLI
+// flag or TELEPORT_MTU environment variable. If neither is specified, it returns
+// 0 indicating automatic path MTU discovery should be used. The CLI flag takes
+// precedence over the environment variable.
+func resolveConfiguredMTU(cliMTU int, envMTU string) (int, error) {
+	if cliMTU != 0 {
+		if cliMTU < minConfiguredMTU || cliMTU > maxConfiguredMTU {
+			return 0, fmt.Errorf("--mtu must be between %d and %d, got %d", minConfiguredMTU, maxConfiguredMTU, cliMTU)
+		}
+		return cliMTU, nil
+	}
+
+	trimmedEnv := strings.TrimSpace(envMTU)
+	if trimmedEnv != "" {
+		val, err := strconv.Atoi(trimmedEnv)
+		if err != nil {
+			return 0, fmt.Errorf("TELEPORT_MTU must be an integer between %d and %d, got %q", minConfiguredMTU, maxConfiguredMTU, trimmedEnv)
+		}
+		if val < minConfiguredMTU || val > maxConfiguredMTU {
+			return 0, fmt.Errorf("TELEPORT_MTU must be between %d and %d, got %d", minConfiguredMTU, maxConfiguredMTU, val)
+		}
+		return val, nil
+	}
+
+	return 0, nil
+}
+
 // discoverPathMTU mirrors wg-quick's auto_mtu: it finds the MTU of the local
 // interface the OS would use to reach endpoint, then subtracts WireGuard's
 // per-packet overhead. Unlike wg-quick it doesn't shell out to `ip route
@@ -345,7 +380,7 @@ func b64KeyToHex(key string) (string, error) {
 	return hex.EncodeToString(decoded), nil
 }
 
-func buildConfig(priv string, port int, endpoint string, info serverInfo, dns []string, clientIP string) string {
+func buildConfig(priv string, port int, endpoint string, info serverInfo, dns []string, clientIP string, mtu int) string {
 	dnsAddr := "192.168.88.1"
 	if len(dns) > 0 {
 		dnsAddr = dns[0]
@@ -362,16 +397,23 @@ func buildConfig(priv string, port int, endpoint string, info serverInfo, dns []
 		}
 		address = clientIP + "/" + clientMask + ", " + address
 	}
+	var ifaceLines []string
+	ifaceLines = append(ifaceLines,
+		"PrivateKey = "+priv,
+		fmt.Sprintf("ListenPort = %d", port),
+		"Address = "+address,
+		"DNS = "+dnsAddr,
+	)
+	if mtu > 0 {
+		ifaceLines = append(ifaceLines, fmt.Sprintf("MTU = %d", mtu))
+	}
 	return fmt.Sprintf(`[Interface]
-PrivateKey = %s
-ListenPort = %d
-Address = %s
-DNS = %s
+%s
 
 [Peer]
 PublicKey = %s
 Endpoint = %s
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
-`, priv, port, address, dnsAddr, info.WGPubKey, endpoint)
+`, strings.Join(ifaceLines, "\n"), info.WGPubKey, endpoint)
 }

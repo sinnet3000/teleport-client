@@ -39,6 +39,7 @@ type cliFlags struct {
 	family           networkFamily
 	debug            bool
 	sessionFile      string
+	mtu              int
 }
 
 // sessionResult is what establishSession produces: either a freshly granted
@@ -175,7 +176,15 @@ func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionR
 		return connectionAttemptResult{}, err
 	}
 
-	conf := buildConfig(priv, port, endpoint, connResp.ServerInfo, connResp.DNSAddrs, connResp.ClientIP)
+	effectiveMTU := flags.mtu
+	if effectiveMTU == 0 {
+		if ep, err := net.ResolveUDPAddr("udp", endpoint); err == nil {
+			effectiveMTU = discoverPathMTU(ep)
+		} else {
+			effectiveMTU = fallbackMTU
+		}
+	}
+	conf := buildConfig(priv, port, endpoint, connResp.ServerInfo, connResp.DNSAddrs, connResp.ClientIP, effectiveMTU)
 	appLog.Info("endpoint selected", "endpoint", endpoint, "mode", endpointMode, "connection_attempt", attempt)
 	appLog.Debug("WireGuard peer configured", "public_key", connResp.ServerInfo.WGPubKey)
 	if session.Access != nil {
@@ -203,6 +212,7 @@ func runConnectionAttempt(ctx context.Context, flags cliFlags, session *sessionR
 		debug:          flags.debug,
 		candidateQueue: candidateQueue,
 		candidateTypes: candidateTypes,
+		mtu:            flags.mtu,
 	})
 	return connectionAttemptResult{
 		tunnelStarted:  true,
@@ -256,6 +266,7 @@ func parseFlags() cliFlags {
 	forceIPv6 := flag.Bool("6", false, "use IPv6 only")
 	debug := flag.Bool("debug", false, "enable debug logging")
 	sessionFile := flag.String("session-file", "sessions/teleport-session.json", "read or save the session file")
+	mtu := flag.Int("mtu", 0, "set the tunnel MTU (1280-1500; defaults to auto-discovery or TELEPORT_MTU)")
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintln(out, "teleport-client "+version)
@@ -359,6 +370,11 @@ func parseFlags() cliFlags {
 		family = familyIPv6
 	}
 
+	configuredMTU, err := resolveConfiguredMTU(*mtu, os.Getenv("TELEPORT_MTU"))
+	if err != nil {
+		failUsage("%v", err)
+	}
+
 	return cliFlags{
 		invite:           *invite,
 		name:             *name,
@@ -371,6 +387,7 @@ func parseFlags() cliFlags {
 		family:           family,
 		debug:            *debug,
 		sessionFile:      *sessionFile,
+		mtu:              configuredMTU,
 	}
 }
 
