@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun/netstack"
+	"github.com/sinnet3000/teleport-client/internal/tunnet"
 )
 
 // tunnelParams collects everything runTunnel needs to bring the WireGuard
@@ -110,7 +110,7 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 
 	mtu := discoverPathMTU(endpointAddr)
 	appLog.Info("path MTU discovered", "endpoint", endpointAddr.String(), "mtu", mtu)
-	tun, tunnelNet, err := netstack.CreateNetTUN(deviceAddrs, dnsAddrs, mtu)
+	tun, tunnelNet, err := tunnet.CreateNetTUN(deviceAddrs, dnsAddrs, mtu)
 	if err != nil {
 		return err
 	}

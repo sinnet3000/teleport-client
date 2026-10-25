@@ -9,14 +9,14 @@ import (
 	"strings"
 
 	"github.com/things-go/go-socks5"
-	"golang.zx2c4.com/wireguard/tun/netstack"
+	"github.com/sinnet3000/teleport-client/internal/tunnet"
 )
 
 // tunnelSocksResolver keeps SOCKS hostname resolution inside the Teleport
 // netstack, rather than leaking it to the host's resolver. It follows the
 // same userspace WireGuard pattern used by wireproxy.
 type tunnelSocksResolver struct {
-	net *netstack.Net
+	net *tunnet.Net
 }
 
 type loggedSocksConn struct {
@@ -86,7 +86,7 @@ func (r tunnelSocksResolver) Resolve(ctx context.Context, name string) (context.
 	return ctx, nil, fmt.Errorf("no IPv4 address found for %q", name)
 }
 
-func startSocks5Proxy(addr string, auth socks5Auth, tunnelNet *netstack.Net) (*socks5Proxy, error) {
+func startSocks5Proxy(addr string, auth socks5Auth, tunnelNet *tunnet.Net) (*socks5Proxy, error) {
 	if tunnelNet == nil {
 		return nil, errors.New("SOCKS5 proxy requires a Teleport netstack")
 	}

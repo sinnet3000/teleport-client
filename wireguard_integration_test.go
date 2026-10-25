@@ -14,7 +14,7 @@ import (
 
 	"golang.org/x/crypto/curve25519"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun/netstack"
+	"github.com/sinnet3000/teleport-client/internal/tunnet"
 )
 
 // genKey returns a deterministic curve25519 WireGuard keypair for a test seed.
@@ -49,7 +49,7 @@ func TestIpcSetReachesPeer(t *testing.T) {
 	// Create the userspace TUN used by production.
 	deviceAddrs := []netip.Addr{netip.MustParseAddr("10.0.0.2")}
 	dnsAddrs := []netip.Addr{netip.MustParseAddr("10.0.0.1")}
-	tun, _, err := netstack.CreateNetTUN(deviceAddrs, dnsAddrs, 1420)
+	tun, _, err := tunnet.CreateNetTUN(deviceAddrs, dnsAddrs, 1420)
 	if err != nil {
 		t.Fatal(err)
 	}

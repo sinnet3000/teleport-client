@@ -10,7 +10,7 @@ import (
 	"net"
 	"time"
 
-	"golang.zx2c4.com/wireguard/tun/netstack"
+	"github.com/sinnet3000/teleport-client/internal/tunnet"
 )
 
 const udpEchoSummaryInterval = 30 * time.Second
@@ -95,7 +95,7 @@ func (s *udpEchoStats) logAndReset(now time.Time) {
 
 // runUDPEchoPinger sends Teleport's post-activation quality probe through the
 // WireGuard netstack to the server-provided UDP echo endpoint.
-func runUDPEchoPinger(ctx context.Context, tunnelNet *netstack.Net, secret string, info serverInfo, healthEvents chan<- udpEchoHealthEvent) error {
+func runUDPEchoPinger(ctx context.Context, tunnelNet *tunnet.Net, secret string, info serverInfo, healthEvents chan<- udpEchoHealthEvent) error {
 	if tunnelNet == nil || info.UDPEchoAddr == "" || info.UDPEchoPort == 0 {
 		appLog.Warn("UDP echo unavailable", "reason", "server supplied no echo endpoint")
 		return nil
