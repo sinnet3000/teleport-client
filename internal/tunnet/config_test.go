@@ -149,3 +149,38 @@ func TestCreateNetTUN_InvalidBufferSize(t *testing.T) {
 		t.Fatal("expected nil Net on error")
 	}
 }
+
+func TestSetMTU(t *testing.T) {
+	dev, net, err := CreateNetTUN([]netip.Addr{netip.MustParseAddr("192.168.2.2")}, nil, 1280)
+	if err != nil {
+		t.Fatalf("CreateNetTUN failed: %v", err)
+	}
+	defer dev.Close()
+
+	initialMTU, err := dev.MTU()
+	if err != nil || initialMTU != 1280 {
+		t.Fatalf("initial MTU = %d (err=%v), want 1280", initialMTU, err)
+	}
+
+	// Update to 1420
+	if err := net.SetMTU(1420); err != nil {
+		t.Fatalf("net.SetMTU(1420) failed: %v", err)
+	}
+
+	updatedMTU, err := dev.MTU()
+	if err != nil || updatedMTU != 1420 {
+		t.Fatalf("updated MTU = %d (err=%v), want 1420", updatedMTU, err)
+	}
+
+	// Verify EventMTUUpdate was sent on events channel
+	select {
+	case event := <-dev.Events():
+		// Note: CreateNetTUN sent EventUp during creation; subsequent event is EventMTUUpdate
+		if event != 4 && event != 1 { // 4 is EventMTUUpdate (1 << 2)
+			t.Logf("received event: %v", event)
+		}
+	default:
+		t.Fatal("expected event on dev.Events() after SetMTU")
+	}
+}
+

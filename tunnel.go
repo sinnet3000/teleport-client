@@ -158,10 +158,18 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 	}()
 	echoStopped := make(chan error, 1)
 	healthEvents := make(chan udpEchoHealthEvent)
+	maxTargetMTU := maxInternetWireMTU - wireGuardOverhead(endpointAddr)
+	manualMTU := p.mtu
+	if manualMTU == 0 {
+		if envMTU, err := resolveConfiguredMTU(0, os.Getenv("TELEPORT_MTU")); err == nil && envMTU > 0 {
+			manualMTU = envMTU
+		}
+	}
+	prober := newPeerMTUProber(mtu, maxTargetMTU, manualMTU)
 	workerWG.Add(1)
 	go func() {
 		defer workerWG.Done()
-		if err := runUDPEchoPinger(lifecycleCtx, tunnelNet, p.stunSecret, p.connResp.ServerInfo, healthEvents); err != nil {
+		if err := runUDPEchoPinger(lifecycleCtx, tunnelNet, p.stunSecret, p.connResp.ServerInfo, healthEvents, prober); err != nil {
 			echoStopped <- err
 		}
 	}()

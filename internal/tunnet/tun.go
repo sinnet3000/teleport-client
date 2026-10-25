@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -47,7 +48,7 @@ type netTun struct {
 	events         chan tun.Event
 	notifyHandle   *channel.NotificationHandle
 	incomingPacket chan *buffer.View
-	mtu            int
+	mtu            atomic.Int32
 	dnsServers     []netip.Addr
 	hasV4, hasV6   bool
 }
@@ -66,8 +67,8 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int, opts ...Opti
 		events:         make(chan tun.Event, 10),
 		incomingPacket: make(chan *buffer.View),
 		dnsServers:     dnsServers,
-		mtu:            mtu,
 	}
+	dev.mtu.Store(int32(mtu))
 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
 	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
 	if tcpipErr != nil {
@@ -195,8 +196,27 @@ func (tun *netTun) Close() error {
 	return nil
 }
 
-func (tun *netTun) MTU() (int, error) {
-	return tun.mtu, nil
+func (dev *netTun) MTU() (int, error) {
+	return int(dev.mtu.Load()), nil
+}
+
+// SetMTU dynamically updates the MTU of the underlying TUN device and gVisor network stack.
+func (dev *netTun) SetMTU(mtu int) error {
+	dev.mtu.Store(int32(mtu))
+	dev.ep.SetMTU(uint32(mtu))
+	if tcpipErr := dev.stack.SetNICMTU(1, uint32(mtu)); tcpipErr != nil {
+		return fmt.Errorf("SetNICMTU(%d): %v", mtu, tcpipErr)
+	}
+	select {
+	case dev.events <- tun.EventMTUUpdate:
+	default:
+	}
+	return nil
+}
+
+// SetMTU dynamically updates the MTU of the network stack and TUN device.
+func (net *Net) SetMTU(mtu int) error {
+	return (*netTun)(net).SetMTU(mtu)
 }
 
 func (tun *netTun) BatchSize() int {

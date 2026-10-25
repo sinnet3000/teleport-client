@@ -95,7 +95,7 @@ func (s *udpEchoStats) logAndReset(now time.Time) {
 
 // runUDPEchoPinger sends Teleport's post-activation quality probe through the
 // WireGuard netstack to the server-provided UDP echo endpoint.
-func runUDPEchoPinger(ctx context.Context, tunnelNet *tunnet.Net, secret string, info serverInfo, healthEvents chan<- udpEchoHealthEvent) error {
+func runUDPEchoPinger(ctx context.Context, tunnelNet *tunnet.Net, secret string, info serverInfo, healthEvents chan<- udpEchoHealthEvent, prober *peerMTUProber) error {
 	if tunnelNet == nil || info.UDPEchoAddr == "" || info.UDPEchoPort == 0 {
 		appLog.Warn("UDP echo unavailable", "reason", "server supplied no echo endpoint")
 		return nil
@@ -122,36 +122,88 @@ func runUDPEchoPinger(ctx context.Context, tunnelNet *tunnet.Net, secret string,
 			return nil
 		default:
 		}
-		request := struct {
-			SessionSecretHash string `json:"session_secret_hash"`
-			RequestID         string `json:"req_id"`
-			Timeout           int    `json:"timeout"`
-		}{secretHash, fmt.Sprint(requestID), 3000}
-		payload, err := json.Marshal(request)
-		if err != nil {
-			return fmt.Errorf("marshal UDP echo request: %w", err)
+
+		var payload []byte
+		var targetMTU int
+		probing := false
+
+		if requestID > 0 && health.ready && prober != nil {
+			if target, ok := prober.NextProbeMTU(); ok {
+				ipHeaderLen := 20
+				if remote.IP.To4() == nil {
+					ipHeaderLen = 40
+				}
+				p, err := buildPaddedEchoPayload(secretHash, fmt.Sprint(requestID), 3000, target, ipHeaderLen)
+				if err == nil {
+					payload = p
+					targetMTU = target
+					probing = true
+				}
+			}
+		}
+
+		if payload == nil {
+			request := struct {
+				SessionSecretHash string `json:"session_secret_hash"`
+				RequestID         string `json:"req_id"`
+				Timeout           int    `json:"timeout"`
+			}{secretHash, fmt.Sprint(requestID), 3000}
+			p, err := json.Marshal(request)
+			if err != nil {
+				return fmt.Errorf("marshal UDP echo request: %w", err)
+			}
+			payload = p
 		}
 
 		started := time.Now()
 		if _, err := conn.Write(payload); err != nil {
 			return fmt.Errorf("write UDP echo request %d: %w", requestID, err)
 		}
-		appLog.Debug("sent UDP echo request", "request_id", requestID, "endpoint", remote.String())
+		if probing {
+			appLog.Debug("sent UDP echo MTU probe", "request_id", requestID, "probe_mtu", targetMTU, "payload_bytes", len(payload))
+		} else {
+			appLog.Debug("sent UDP echo request", "request_id", requestID, "endpoint", remote.String())
+		}
 
 		var matched bool
 		if requestID == 0 {
-			matched = waitForStartupResponse(ctx, conn, buf, requestID, request.RequestID, started, func() error {
+			matched = waitForStartupResponse(ctx, conn, buf, requestID, fmt.Sprint(requestID), started, func() error {
 				_, err := conn.Write(payload)
 				return err
 			})
 		} else {
-			matched = waitForSteadyStateResponse(ctx, conn, buf, requestID, request.RequestID)
+			matched = waitForSteadyStateResponse(ctx, conn, buf, requestID, fmt.Sprint(requestID))
 		}
 		if ctx.Err() != nil {
 			return nil
 		}
 
+		if probing {
+			mtuChanged, confirmedMTU, done := prober.RecordProbeResult(targetMTU, matched)
+			if matched {
+				rtt := time.Since(started)
+				if mtuChanged {
+					_ = tunnelNet.SetMTU(confirmedMTU)
+					appLog.Info("path MTU probe confirmed", "probe_mtu", targetMTU, "locked_mtu", confirmedMTU, "rtt", rtt.Round(time.Millisecond))
+				}
+				if done {
+					appLog.Info("path MTU search complete", "locked_mtu", confirmedMTU)
+				}
+			} else {
+				if done {
+					appLog.Info("path MTU search complete", "locked_mtu", confirmedMTU, "failed_probe", targetMTU)
+				} else {
+					appLog.Debug("path MTU probe timed out, retrying", "probe_mtu", targetMTU)
+				}
+			}
+		}
+
 		event, firstSuccess := health.observe(matched)
+		if event == udpEchoUnhealthy && prober != nil {
+			prober.Reset()
+			_ = tunnelNet.SetMTU(baseTunnelMTU)
+			appLog.Warn("sustained echo loss; path MTU reset to safe baseline", "base_mtu", baseTunnelMTU)
+		}
 		if event != 0 {
 			select {
 			case healthEvents <- event:
@@ -162,7 +214,9 @@ func runUDPEchoPinger(ctx context.Context, tunnelNet *tunnet.Net, secret string,
 		if matched {
 			now := time.Now()
 			rtt := now.Sub(started)
-			appLog.Debug("received UDP echo response", "request_id", requestID, "rtt", rtt.Round(time.Millisecond))
+			if !probing {
+				appLog.Debug("received UDP echo response", "request_id", requestID, "rtt", rtt.Round(time.Millisecond))
+			}
 			if firstSuccess {
 				appLog.Info("WireGuard tunnel ready", "initial_echo_rtt", rtt.Round(time.Millisecond))
 			}
