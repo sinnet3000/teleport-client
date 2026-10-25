@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -110,7 +111,12 @@ func runTunnel(ctx context.Context, p tunnelParams) error {
 
 	mtu := discoverPathMTU(endpointAddr)
 	appLog.Info("path MTU discovered", "endpoint", endpointAddr.String(), "mtu", mtu)
-	tun, tunnelNet, err := tunnet.CreateNetTUN(deviceAddrs, dnsAddrs, mtu)
+	var tunOpts []tunnet.Option
+	if cc := os.Getenv("TELEPORT_TCP_CONGESTION_CONTROL"); cc != "" {
+		tunOpts = append(tunOpts, tunnet.WithCongestionControl(cc))
+		appLog.Info("TCP congestion control override requested", "cc", cc)
+	}
+	tun, tunnelNet, err := tunnet.CreateNetTUN(deviceAddrs, dnsAddrs, mtu, tunOpts...)
 	if err != nil {
 		return err
 	}
