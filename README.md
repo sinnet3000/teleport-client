@@ -32,7 +32,7 @@ local SOCKS5 proxy without routing the entire host through the tunnel.
 
 ## Requirements
 
-- Go 1.25 or later (see `go.mod`)
+- Go 1.26.11 or later (see `go.mod`)
 - A reachable UniFi console with Teleport enabled
 - A fresh `https://teleport.ui.link/<UUID>` invite for the first pairing
 

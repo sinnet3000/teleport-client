@@ -1,6 +1,6 @@
 module github.com/sinnet3000/teleport-client
 
-go 1.26.3
+go 1.26.11
 
 require (
 	github.com/pion/stun v0.3.5
